@@ -150,8 +150,11 @@
 - [x] `systemd/epp-server.service` - Systemd service unit file with security hardening
 - [x] `scripts/generate_certs.sh` - TLS certificate generation script (CA, server, client)
 - [x] `packaging/epp-server.spec` - RPM spec file (self-contained)
-- [x] `packaging/build_rpm.sh` - RPM build script (downloads and bundles all deps)
+- [x] `packaging/build_rpm.sh` - RPM build script (requires rpmbuild)
+- [x] `packaging/build_tarball.sh` - Tarball build script (no rpmbuild needed)
+- [x] `tests/test_local.py` - Local test suite (no database required)
 - [x] `README.md` - Comprehensive installation and configuration guide
+- [x] `INSTALL.md` - Step-by-step installation guide
 
 ### Key Features:
 - **Self-contained RPM** - All Python dependencies bundled in virtual environment
@@ -185,25 +188,63 @@ The RPM package is **fully self-contained** with all dependencies bundled:
 ```
 
 ### Build Instructions:
+
+**Option 1: Tarball (Recommended)**
 ```bash
 # Install build dependencies
-dnf install python3 python3-pip python3-devel rpm-build \
+dnf install python3 python3-pip python3-devel \
     gcc libxml2-devel libxslt-devel openssl-devel
 
-# Build the RPM (downloads and bundles all dependencies)
+# Build the tarball
+./packaging/build_tarball.sh
+
+# Tarball created at: dist/epp-server-1.0.0.tar.gz
+```
+
+**Option 2: RPM (requires rpmbuild)**
+```bash
+# Additional dependency
+dnf install rpm-build
+
+# Build the RPM
 ./packaging/build_rpm.sh
 
 # RPM created at: packaging/epp-server-1.0.0-1.el9.x86_64.rpm
 ```
 
+### Testing:
+```bash
+# Run local tests (no database required)
+python tests/test_local.py
+
+# Expected output: 8/8 tests passed
+```
+
 ### Installation Steps:
+
+**From Tarball:**
+```bash
+# 1. Copy to server
+scp dist/epp-server-1.0.0.tar.gz user@server:/tmp/
+
+# 2. Extract and install
+cd /tmp
+tar -xzf epp-server-1.0.0.tar.gz
+cd epp-server-1.0.0
+sudo ./install.sh
+```
+
+**From RPM:**
 ```bash
 # 1. Install Oracle Instant Client
 dnf install oracle-instantclient-basic
 
-# 2. Install EPP Server (no internet needed)
+# 2. Install EPP Server
 dnf install ./epp-server-1.0.0-1.el9.x86_64.rpm
+```
 
+**Post-Install Configuration:**
+```bash
 # 3. Configure Oracle connection
 vi /opt/epp-server/config/epp.yaml
 
@@ -311,9 +352,15 @@ Example: 12345-AE
 │   └── generate_certs.sh
 ├── packaging/
 │   ├── epp-server.spec
-│   └── build_rpm.sh
+│   ├── build_rpm.sh
+│   └── build_tarball.sh
+├── tests/
+│   └── test_local.py
+├── dist/
+│   └── epp-server-1.0.0.tar.gz
 ├── requirements.txt
 ├── README.md
+├── INSTALL.md
 └── PROGRESS.md
 ```
 
@@ -343,6 +390,24 @@ All 6 phases completed successfully:
 - **Phase 3**: Session Management (authentication, logging, session tracking)
 - **Phase 4**: Query Commands (check, info for domains/contacts/hosts)
 - **Phase 5**: Transform Commands (create, update, delete, renew, transfer)
-- **Phase 6**: Deployment (systemd, certificates, self-contained RPM)
+- **Phase 6**: Deployment (systemd, certificates, self-contained package)
+
+## Local Test Results
+```
+✓ Module Imports (8 modules)
+✓ Frame Handler (encoding/decoding)
+✓ XML Processor (login, logout, domain:check)
+✓ Response Builder (greeting, success, error, domain:check)
+✓ Validators (domain, contact, email, phone, IP, country)
+✓ Password Utilities (generate, validate, hash, verify, mask)
+✓ Database Models (Account, Domain, Contact, Host)
+✓ TLS Configuration
+
+Total: 8/8 tests passed
+```
+
+## Package Location
+- **Tarball**: `dist/epp-server-1.0.0.tar.gz` (21MB, self-contained)
+- **GitHub**: https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry
 
 The EPP server is ready for building and deployment.

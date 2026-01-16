@@ -48,6 +48,22 @@ class EPPCommand:
     raw_xml: Optional[bytes] = None
 
 
+def _find_element(parent: etree._Element, name: str, nsmap: dict = None) -> Optional[etree._Element]:
+    """
+    Find element with namespace fallback.
+
+    Uses explicit 'is not None' check to avoid lxml element truth-testing issues.
+    """
+    if nsmap:
+        elem = parent.find(f"epp:{name}", nsmap)
+        if elem is not None:
+            return elem
+    elem = parent.find(name)
+    if elem is not None:
+        return elem
+    return None
+
+
 class XMLProcessor:
     """
     Processes EPP XML messages.
@@ -96,7 +112,7 @@ class XMLProcessor:
             raise XMLValidationError(f"Root element must be 'epp', got '{root.tag}'")
 
         # Check for hello (no child elements needed)
-        hello = root.find("epp:hello", NSMAP) or root.find("hello")
+        hello = _find_element(root, "hello", NSMAP)
         if hello is not None:
             return EPPCommand(
                 command_type="hello",
@@ -104,12 +120,12 @@ class XMLProcessor:
             )
 
         # Find command element
-        command_elem = root.find("epp:command", NSMAP) or root.find("command")
+        command_elem = _find_element(root, "command", NSMAP)
         if command_elem is None:
             raise XMLValidationError("Missing <command> element")
 
         # Extract client transaction ID
-        cl_trid_elem = command_elem.find("epp:clTRID", NSMAP) or command_elem.find("clTRID")
+        cl_trid_elem = _find_element(command_elem, "clTRID", NSMAP)
         cl_trid = cl_trid_elem.text if cl_trid_elem is not None else None
 
         # Determine command type
@@ -139,13 +155,13 @@ class XMLProcessor:
         """
         # Session commands (no object type)
         for cmd in ["login", "logout"]:
-            elem = command_elem.find(f"epp:{cmd}", NSMAP) or command_elem.find(cmd)
+            elem = _find_element(command_elem, cmd, NSMAP)
             if elem is not None:
                 data = self._parse_login(elem) if cmd == "login" else {}
                 return cmd, None, data
 
         # Poll command
-        poll_elem = command_elem.find("epp:poll", NSMAP) or command_elem.find("poll")
+        poll_elem = _find_element(command_elem, "poll", NSMAP)
         if poll_elem is not None:
             op = poll_elem.get("op", "req")
             msg_id = poll_elem.get("msgID")
@@ -153,7 +169,7 @@ class XMLProcessor:
 
         # Object commands
         for cmd in ["check", "info", "create", "delete", "update", "renew", "transfer"]:
-            elem = command_elem.find(f"epp:{cmd}", NSMAP) or command_elem.find(cmd)
+            elem = _find_element(command_elem, cmd, NSMAP)
             if elem is not None:
                 object_type, data = self._parse_object_command(cmd, elem)
                 return cmd, object_type, data
@@ -165,41 +181,47 @@ class XMLProcessor:
         data = {}
 
         # Client ID
-        clid = login_elem.find("epp:clID", NSMAP) or login_elem.find("clID")
+        clid = _find_element(login_elem, "clID", NSMAP)
         if clid is not None:
             data["clID"] = clid.text
 
         # Password
-        pw = login_elem.find("epp:pw", NSMAP) or login_elem.find("pw")
+        pw = _find_element(login_elem, "pw", NSMAP)
         if pw is not None:
             data["pw"] = pw.text
 
         # New password (optional)
-        newpw = login_elem.find("epp:newPW", NSMAP) or login_elem.find("newPW")
+        newpw = _find_element(login_elem, "newPW", NSMAP)
         if newpw is not None:
             data["newPW"] = newpw.text
 
         # Options
-        options = login_elem.find("epp:options", NSMAP) or login_elem.find("options")
+        options = _find_element(login_elem, "options", NSMAP)
         if options is not None:
-            version = options.find("epp:version", NSMAP) or options.find("version")
-            lang = options.find("epp:lang", NSMAP) or options.find("lang")
+            version = _find_element(options, "version", NSMAP)
+            lang = _find_element(options, "lang", NSMAP)
             data["version"] = version.text if version is not None else "1.0"
             data["lang"] = lang.text if lang is not None else "en"
 
         # Services
-        svcs = login_elem.find("epp:svcs", NSMAP) or login_elem.find("svcs")
+        svcs = _find_element(login_elem, "svcs", NSMAP)
         if svcs is not None:
             data["objURIs"] = []
-            for obj_uri in svcs.findall("epp:objURI", NSMAP) or svcs.findall("objURI"):
+            obj_uris = svcs.findall("epp:objURI", NSMAP)
+            if not obj_uris:
+                obj_uris = svcs.findall("objURI")
+            for obj_uri in obj_uris:
                 if obj_uri.text:
                     data["objURIs"].append(obj_uri.text)
 
             # Extension URIs
-            svc_ext = svcs.find("epp:svcExtension", NSMAP) or svcs.find("svcExtension")
+            svc_ext = _find_element(svcs, "svcExtension", NSMAP)
             if svc_ext is not None:
                 data["extURIs"] = []
-                for ext_uri in svc_ext.findall("epp:extURI", NSMAP) or svc_ext.findall("extURI"):
+                ext_uris = svc_ext.findall("epp:extURI", NSMAP)
+                if not ext_uris:
+                    ext_uris = svc_ext.findall("extURI")
+                for ext_uri in ext_uris:
                     if ext_uri.text:
                         data["extURIs"].append(ext_uri.text)
 
@@ -675,7 +697,7 @@ class XMLProcessor:
     def _parse_extensions(self, command_elem: etree._Element) -> Dict[str, Any]:
         """Parse command extensions."""
         extensions = {}
-        ext_elem = command_elem.find("epp:extension", NSMAP) or command_elem.find("extension")
+        ext_elem = _find_element(command_elem, "extension", NSMAP)
         if ext_elem is not None:
             # Generic extension parsing - store raw XML for each extension
             for child in ext_elem:

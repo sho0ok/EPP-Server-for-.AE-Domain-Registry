@@ -22,26 +22,55 @@ A complete EPP (Extensible Provisioning Protocol) server implementation for the 
 ### Build Machine
 - Python 3.9+
 - pip and venv modules
-- rpm-build package
 - Development libraries: libxml2-devel, libxslt-devel, openssl-devel, gcc
+- rpm-build package (only if building RPM instead of tarball)
 
 ## Quick Start
 
-### Building the RPM
+### Building the Package
+
+**Option 1: Build Tarball (Recommended)**
 
 ```bash
 # Install build dependencies (RHEL/Rocky/Alma)
-dnf install python3 python3-pip python3-devel rpm-build \
+dnf install python3 python3-pip python3-devel \
     gcc libxml2-devel libxslt-devel openssl-devel
 
-# Build the RPM
+# Build the self-contained tarball
 cd /path/to/epp-server
+./packaging/build_tarball.sh
+
+# Tarball created at: dist/epp-server-1.0.0.tar.gz
+```
+
+**Option 2: Build RPM (requires rpmbuild)**
+
+```bash
+# Additional dependency for RPM
+dnf install rpm-build
+
+# Build the RPM
 ./packaging/build_rpm.sh
 
-# RPM will be created in packaging/epp-server-1.0.0-1.el9.x86_64.rpm
+# RPM created at: packaging/epp-server-1.0.0-1.el9.x86_64.rpm
 ```
 
 ### Installation
+
+**From Tarball:**
+
+```bash
+# Copy to server
+scp dist/epp-server-1.0.0.tar.gz user@server:/tmp/
+
+# On server (as root):
+cd /tmp
+tar -xzf epp-server-1.0.0.tar.gz
+cd epp-server-1.0.0
+./install.sh
+```
+
+**From RPM:**
 
 ```bash
 # Install Oracle Instant Client (if not already installed)
@@ -323,11 +352,18 @@ python -m src.server --config config/epp.yaml
 ### Running Tests
 
 ```bash
-# Install test dependencies
-pip install pytest pytest-asyncio
+# Run local tests (no database required)
+python tests/test_local.py
 
-# Run tests
-pytest tests/
+# Tests verify:
+# - Module imports
+# - Frame handler (EPP framing)
+# - XML processor (command parsing)
+# - Response builder (XML generation)
+# - Validators (domain, contact, email, phone, IP)
+# - Password utilities
+# - Database models
+# - TLS configuration
 ```
 
 ## License

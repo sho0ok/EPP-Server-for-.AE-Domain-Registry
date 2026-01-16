@@ -154,6 +154,11 @@ copy_project_files() {
     cp "${PROJECT_DIR}/requirements.txt" "${DEST}/"
     cp "${PROJECT_DIR}/README.md" "${DEST}/"
     cp "${PROJECT_DIR}/PROGRESS.md" "${DEST}/"
+    cp "${PROJECT_DIR}/INSTALL.md" "${DEST}/"
+
+    # Copy tests
+    mkdir -p "${DEST}/tests"
+    cp "${PROJECT_DIR}/tests/test_local.py" "${DEST}/tests/"
 
     # Create empty directories
     mkdir -p "${DEST}/logs"

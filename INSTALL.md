@@ -182,6 +182,18 @@ openssl s_client -connect localhost:700 \
     -CAfile /opt/epp-server/config/tls/ca.crt
 ```
 
+### Run Local Tests (Before Installation)
+```bash
+# On build machine, verify components work without database
+cd /path/to/epp-server
+source build/epp-server-1.0.0/venv/bin/activate  # or use system python with deps
+python tests/test_local.py
+
+# Expected: 8/8 tests passed
+# Tests: Module imports, Frame handler, XML processor, Response builder,
+#        Validators, Password utilities, Database models, TLS config
+```
+
 ---
 
 ## Directory Structure After Installation

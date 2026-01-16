@@ -23,7 +23,12 @@ import yaml
 from src.core.tls_handler import TLSHandler, ClientCertInfo
 from src.core.frame_handler import FrameHandler, FrameReadError, FrameSizeError
 from src.core.xml_processor import XMLProcessor, XMLParseError, XMLValidationError, EPPCommand
+from src.core.session_manager import SessionInfo
 from src.database.connection import initialize_pool, close_pool, get_pool
+from src.database.repositories import get_account_repo
+from src.commands.domain import get_domain_handler
+from src.commands.contact import get_contact_handler
+from src.commands.host import get_host_handler
 from src.utils.response_builder import (
     ResponseBuilder,
     initialize_response_builder,
@@ -66,7 +71,7 @@ class EPPClientHandler:
         self.client_port: int = 0
         self.client_cert: Optional[ClientCertInfo] = None
 
-        # Session state
+        # Session state (legacy attributes for backwards compatibility)
         self.authenticated: bool = False
         self.session_id: Optional[int] = None
         self.connection_id: Optional[int] = None
@@ -74,21 +79,45 @@ class EPPClientHandler:
         self.account_id: Optional[int] = None
         self.client_id: Optional[str] = None
 
+        # Session info object (for command handlers)
+        self.session: Optional[SessionInfo] = None
+
         # Extract connection info
         self._extract_connection_info()
 
     def _extract_connection_info(self) -> None:
         """Extract client IP and certificate info from transport."""
+        from datetime import datetime
+
         transport = self.writer.get_extra_info("transport")
+        server_ip = "0.0.0.0"
+        server_port = self.config.get("server", {}).get("port", 700)
+
         if transport:
             peername = transport.get_extra_info("peername")
             if peername:
                 self.client_ip = peername[0]
                 self.client_port = peername[1]
 
+            sockname = transport.get_extra_info("sockname")
+            if sockname:
+                server_ip = sockname[0]
+                server_port = sockname[1]
+
             ssl_object = transport.get_extra_info("ssl_object")
             if ssl_object:
                 self.client_cert = TLSHandler.extract_client_cert_info(ssl_object)
+
+        # Create SessionInfo for command handlers
+        self.session = SessionInfo(
+            connection_id=0,  # Will be set when logged to DB
+            client_ip=self.client_ip,
+            client_port=self.client_port,
+            server_ip=server_ip,
+            server_port=server_port,
+            server_name=self.config.get("epp", {}).get("server_id", "EPP Server"),
+            connect_time=datetime.utcnow()
+        )
 
         logger.info(f"Client connected: {self.client_ip}:{self.client_port}")
         if self.client_cert:
@@ -214,18 +243,7 @@ class EPPClientHandler:
             return await self._handle_poll(command)
 
         # Object commands - dispatch to appropriate handler
-        handler_name = f"_handle_{command.object_type}_{command.command_type}"
-        handler = getattr(self, handler_name, None)
-
-        if handler:
-            return await handler(command)
-
-        # Unknown command
-        return self.response_builder.build_error(
-            code=2101,
-            message=f"Unimplemented command: {command.command_type}",
-            cl_trid=cl_trid
-        )
+        return await self._handle_object_command(command)
 
     async def _handle_login(self, command: EPPCommand) -> bytes:
         """Handle login command."""
@@ -251,29 +269,76 @@ class EPPClientHandler:
                 cl_trid=cl_trid
             )
 
-        # TODO: Implement actual authentication against ACCOUNTS/USERS tables
-        # For now, return success for testing
         logger.info(f"Login attempt: {client_id} from {self.client_ip}")
 
-        # Placeholder: Accept any login for initial testing
-        # This will be replaced with actual authentication in Phase 3
-        self.authenticated = True
-        self.client_id = client_id
+        try:
+            # Authenticate against database
+            account_repo = get_account_repo()
+            user = await account_repo.authenticate_user(client_id, password)
 
-        return self.response_builder.build_response(
-            code=1000,
-            message="Command completed successfully",
-            cl_trid=cl_trid
-        )
+            if user is None:
+                logger.warning(f"Authentication failed for {client_id} from {self.client_ip}")
+                return self.response_builder.build_error(
+                    code=2200,
+                    message="Authentication error: invalid credentials",
+                    cl_trid=cl_trid
+                )
+
+            # Check IP whitelist
+            ip_allowed = await account_repo.check_ip_whitelist(user.USR_ACC_ID, self.client_ip)
+            if not ip_allowed:
+                logger.warning(f"IP {self.client_ip} not whitelisted for account {user.USR_ACC_ID}")
+                return self.response_builder.build_error(
+                    code=2200,
+                    message="Authentication error: IP address not authorized",
+                    cl_trid=cl_trid
+                )
+
+            # Authentication successful
+            from datetime import datetime
+
+            self.authenticated = True
+            self.client_id = client_id
+            self.account_id = user.USR_ACC_ID
+            self.user_id = user.USR_ID
+
+            # Update session info for command handlers
+            if self.session:
+                self.session.authenticated = True
+                self.session.client_id = client_id
+                self.session.account_id = user.USR_ACC_ID
+                self.session.user_id = user.USR_ID
+                self.session.username = user.USR_NAME
+                self.session.login_time = datetime.utcnow()
+
+            logger.info(f"Login successful: {client_id} (account {user.USR_ACC_ID}) from {self.client_ip}")
+
+            return self.response_builder.build_response(
+                code=1000,
+                message="Command completed successfully",
+                cl_trid=cl_trid
+            )
+
+        except Exception as e:
+            logger.error(f"Login error for {client_id}: {e}")
+            return self.response_builder.build_error(
+                code=2400,
+                message="Command failed: internal server error",
+                cl_trid=cl_trid
+            )
 
     async def _handle_logout(self, command: EPPCommand) -> bytes:
         """Handle logout command."""
         cl_trid = command.client_transaction_id
 
-        # TODO: End session in database
-
+        # Clear session state
         self.authenticated = False
         self.client_id = None
+        self.account_id = None
+
+        # Update session info
+        if self.session:
+            self.session.authenticated = False
 
         return self.response_builder.build_response(
             code=1500,
@@ -314,68 +379,48 @@ class EPPClientHandler:
                 cl_trid=cl_trid
             )
 
-    # Placeholder handlers for object commands
-    # These will be implemented in Phase 4 and 5
+    async def _handle_object_command(self, command: EPPCommand) -> bytes:
+        """
+        Handle object commands (domain, contact, host).
 
-    async def _handle_domain_check(self, command: EPPCommand) -> bytes:
-        """Handle domain:check command."""
+        Dispatches to the appropriate handler based on object type.
+        """
         cl_trid = command.client_transaction_id
-        # TODO: Implement in Phase 4
-        return self.response_builder.build_error(
-            code=2101,
-            message="Unimplemented command",
-            cl_trid=cl_trid
-        )
+        object_type = command.object_type
+        command_type = command.command_type
 
-    async def _handle_domain_info(self, command: EPPCommand) -> bytes:
-        """Handle domain:info command."""
-        cl_trid = command.client_transaction_id
-        # TODO: Implement in Phase 4
-        return self.response_builder.build_error(
-            code=2101,
-            message="Unimplemented command",
-            cl_trid=cl_trid
-        )
+        # Get the appropriate handler factory
+        if object_type == "domain":
+            handler = get_domain_handler(command_type)
+        elif object_type == "contact":
+            handler = get_contact_handler(command_type)
+        elif object_type == "host":
+            handler = get_host_handler(command_type)
+        else:
+            return self.response_builder.build_error(
+                code=2000,
+                message=f"Unknown object type: {object_type}",
+                cl_trid=cl_trid
+            )
 
-    async def _handle_contact_check(self, command: EPPCommand) -> bytes:
-        """Handle contact:check command."""
-        cl_trid = command.client_transaction_id
-        # TODO: Implement in Phase 4
-        return self.response_builder.build_error(
-            code=2101,
-            message="Unimplemented command",
-            cl_trid=cl_trid
-        )
+        if handler is None:
+            return self.response_builder.build_error(
+                code=2101,
+                message=f"Unimplemented command: {object_type}:{command_type}",
+                cl_trid=cl_trid
+            )
 
-    async def _handle_contact_info(self, command: EPPCommand) -> bytes:
-        """Handle contact:info command."""
-        cl_trid = command.client_transaction_id
-        # TODO: Implement in Phase 4
-        return self.response_builder.build_error(
-            code=2101,
-            message="Unimplemented command",
-            cl_trid=cl_trid
-        )
+        try:
+            # Execute the handler with session info (includes logging)
+            return await handler.execute(command, self.session)
 
-    async def _handle_host_check(self, command: EPPCommand) -> bytes:
-        """Handle host:check command."""
-        cl_trid = command.client_transaction_id
-        # TODO: Implement in Phase 4
-        return self.response_builder.build_error(
-            code=2101,
-            message="Unimplemented command",
-            cl_trid=cl_trid
-        )
-
-    async def _handle_host_info(self, command: EPPCommand) -> bytes:
-        """Handle host:info command."""
-        cl_trid = command.client_transaction_id
-        # TODO: Implement in Phase 4
-        return self.response_builder.build_error(
-            code=2101,
-            message="Unimplemented command",
-            cl_trid=cl_trid
-        )
+        except Exception as e:
+            logger.error(f"Error handling {object_type}:{command_type}: {e}", exc_info=True)
+            return self.response_builder.build_error(
+                code=2400,
+                message="Command failed: internal server error",
+                cl_trid=cl_trid
+            )
 
     async def _cleanup(self) -> None:
         """Clean up connection resources."""
