@@ -1,8 +1,56 @@
-# EPP Server for .AE Domain Registry
+# EPP Server & Client for .AE Domain Registry
 
-A complete EPP (Extensible Provisioning Protocol) server implementation for the .AE domain registry, compliant with RFC 5730-5734.
+A complete EPP (Extensible Provisioning Protocol) server and client implementation for the .AE domain registry, compliant with RFC 5730-5734.
 
-## Features
+This repository contains:
+- **Server** (`/src`) - EPP server with Oracle backend
+- **Client** (`/client`) - Python client toolkit for registrars
+
+## EPP Client Toolkit (for Registrars)
+
+The `client/` directory contains a production-ready Python EPP client toolkit. See [client/README.md](client/README.md) for full documentation.
+
+### Quick Install
+
+```bash
+cd client
+pip install .
+```
+
+### Quick Usage
+
+```python
+from epp_client import EPPClient
+
+with EPPClient(
+    host="epp.registry.ae",
+    port=700,
+    cert_file="client.crt",
+    key_file="client.key",
+    ca_file="ca.crt",
+) as client:
+    client.login("registrar_id", "password")
+
+    # Check domain availability
+    result = client.domain_check(["example.ae", "test.ae"])
+    for item in result.results:
+        print(f"{item.name}: {'available' if item.available else 'taken'}")
+
+    client.logout()
+```
+
+### CLI Tool
+
+```bash
+epp --host epp.registry.ae --cert client.crt --key client.key \
+    -u registrar_id domain check example.ae test.ae
+```
+
+---
+
+## EPP Server (for Registry)
+
+### Features
 
 - **Full RFC Compliance**: Implements RFC 5730 (EPP), RFC 5731 (Domain), RFC 5732 (Host), RFC 5733 (Contact), RFC 5734 (TCP Transport)
 - **Secure by Design**: TLS 1.2+ with client certificate authentication

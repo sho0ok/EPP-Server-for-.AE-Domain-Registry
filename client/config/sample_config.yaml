@@ -1,0 +1,41 @@
+# EPP Client Configuration Sample
+# Copy this file to ~/.epp/config.yaml and update with your credentials
+
+server:
+  host: epp.registry.ae
+  port: 700
+  timeout: 30
+  verify_server: true
+
+certs:
+  cert_file: ~/.epp/client.crt
+  key_file: ~/.epp/client.key
+  ca_file: ~/.epp/ca.crt
+
+credentials:
+  client_id: your_registrar_id
+  # password: your_password  # Optional, will prompt if not set
+  # Or use EPP_PASSWORD environment variable
+
+# Multiple profiles for different environments
+profiles:
+  production:
+    server:
+      host: epp.registry.ae
+      port: 700
+    credentials:
+      client_id: prod_registrar_id
+
+  ote:
+    server:
+      host: epp-ote.registry.ae
+      port: 700
+    credentials:
+      client_id: ote_registrar_id
+
+  sandbox:
+    server:
+      host: epp-sandbox.registry.ae
+      port: 700
+    credentials:
+      client_id: sandbox_registrar_id
