@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# Build directories
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Runtime
+run/
+*.pid
+
+# TLS certificates (sensitive)
+config/tls/*.key
+config/tls/*.crt
+config/tls/*.pem
+config/tls/*.csr
+
+# RPM build
+*.rpm
+~/rpmbuild/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit these)
+*.env
+.env.*
+secrets.yaml
+credentials.yaml
+
+# Temporary files
+*.tmp
+*.temp
+*.bak

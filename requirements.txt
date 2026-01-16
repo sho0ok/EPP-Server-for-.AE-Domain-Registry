@@ -1,0 +1,25 @@
+# EPP Server Dependencies
+# ======================
+
+# Oracle Database Driver
+# Async connection pooling for ARI Oracle schema
+oracledb>=1.4.0
+
+# XML Processing Library
+# EPP protocol uses XML - lxml provides fast, secure XML parsing
+# with namespace support and protection against XXE attacks
+lxml>=4.9.0
+
+# YAML Configuration Parser
+# Used for reading epp.yaml and logging.yaml config files
+pyyaml>=6.0
+
+# Cryptography Library
+# TLS certificate handling, secure random generation,
+# and timing-safe password comparison
+cryptography>=41.0.0
+
+# Date/Time Utilities
+# Domain expiry calculations, renewal periods,
+# and relativedelta for adding years/months
+python-dateutil>=2.8.0
