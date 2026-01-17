@@ -90,6 +90,19 @@ class DomainContact:
 
 
 @dataclass
+class DomainEligibilityInfo:
+    """AE Eligibility info from domain response."""
+    eligibility_type: Optional[str] = None
+    eligibility_name: Optional[str] = None
+    eligibility_id: Optional[str] = None
+    eligibility_id_type: Optional[str] = None
+    policy_reason: Optional[int] = None
+    registrant_id: Optional[str] = None
+    registrant_id_type: Optional[str] = None
+    registrant_name: Optional[str] = None
+
+
+@dataclass
 class DomainInfo:
     """Domain info response."""
     name: str
@@ -107,6 +120,8 @@ class DomainInfo:
     ex_date: Optional[datetime] = None  # Expiry
     tr_date: Optional[datetime] = None  # Transfer
     auth_info: Optional[str] = None
+    # Extension data for restricted zones
+    eligibility: Optional[DomainEligibilityInfo] = None
 
 
 @dataclass
@@ -289,6 +304,19 @@ class PostalInfo:
 
 
 @dataclass
+class AEEligibility:
+    """AE Eligibility extension data for restricted zones (.co.ae, .gov.ae, etc.)."""
+    eligibility_type: str  # TradeLicense, Trademark, etc.
+    eligibility_name: str  # Company/organization name
+    eligibility_id: Optional[str] = None  # License/trademark number
+    eligibility_id_type: Optional[str] = None  # TradeLicense, Trademark, etc.
+    policy_reason: Optional[int] = None  # 1-3 for different policy reasons
+    registrant_id: Optional[str] = None  # Emirates ID, etc.
+    registrant_id_type: Optional[str] = None  # EmiratesID, Passport, etc.
+    registrant_name: Optional[str] = None  # Registrant name
+
+
+@dataclass
 class DomainCreate:
     """Domain create request."""
     name: str
@@ -300,6 +328,8 @@ class DomainCreate:
     billing: Optional[str] = None
     nameservers: List[str] = field(default_factory=list)
     auth_info: Optional[str] = None  # Auto-generated if not provided
+    # Extension for restricted zones
+    ae_eligibility: Optional[AEEligibility] = None
 
 
 @dataclass

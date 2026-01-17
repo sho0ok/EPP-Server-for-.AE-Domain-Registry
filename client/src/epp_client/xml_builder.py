@@ -70,6 +70,47 @@ def _add_cl_trid(command: etree._Element, cl_trid: str = None) -> None:
     etree.SubElement(command, "{%s}clTRID" % EPP_NS).text = cl_trid
 
 
+# AE Eligibility namespace
+AE_ELIGIBILITY_NS = "urn:aeda:params:xml:ns:aeEligibility-1.0"
+
+
+def _add_ae_eligibility_extension(command: etree._Element, eligibility) -> None:
+    """Add AE Eligibility extension to command."""
+    extension = etree.SubElement(command, "{%s}extension" % EPP_NS)
+
+    ae_create = etree.Element(
+        "{%s}create" % AE_ELIGIBILITY_NS,
+        nsmap={"aeEligibility": AE_ELIGIBILITY_NS}
+    )
+
+    # Add eligibility fields
+    if eligibility.eligibility_type:
+        etree.SubElement(ae_create, "{%s}eligibilityType" % AE_ELIGIBILITY_NS).text = eligibility.eligibility_type
+
+    if eligibility.eligibility_name:
+        etree.SubElement(ae_create, "{%s}eligibilityName" % AE_ELIGIBILITY_NS).text = eligibility.eligibility_name
+
+    if eligibility.eligibility_id:
+        etree.SubElement(ae_create, "{%s}eligibilityID" % AE_ELIGIBILITY_NS).text = eligibility.eligibility_id
+
+    if eligibility.eligibility_id_type:
+        etree.SubElement(ae_create, "{%s}eligibilityIDType" % AE_ELIGIBILITY_NS).text = eligibility.eligibility_id_type
+
+    if eligibility.policy_reason is not None:
+        etree.SubElement(ae_create, "{%s}policyReason" % AE_ELIGIBILITY_NS).text = str(eligibility.policy_reason)
+
+    if eligibility.registrant_id:
+        etree.SubElement(ae_create, "{%s}registrantID" % AE_ELIGIBILITY_NS).text = eligibility.registrant_id
+
+    if eligibility.registrant_id_type:
+        etree.SubElement(ae_create, "{%s}registrantIDType" % AE_ELIGIBILITY_NS).text = eligibility.registrant_id_type
+
+    if eligibility.registrant_name:
+        etree.SubElement(ae_create, "{%s}registrantName" % AE_ELIGIBILITY_NS).text = eligibility.registrant_name
+
+    extension.append(ae_create)
+
+
 def _to_bytes(root: etree._Element) -> bytes:
     """Convert element tree to XML bytes."""
     return etree.tostring(
@@ -278,6 +319,11 @@ class XMLBuilder:
         etree.SubElement(auth, "{%s}pw" % DOMAIN_NS).text = auth_info
 
         _add_cl_trid(command, cl_trid)
+
+        # Add AE Eligibility extension if present
+        if create_data.ae_eligibility:
+            _add_ae_eligibility_extension(command, create_data.ae_eligibility)
+
         return _to_bytes(root)
 
     @staticmethod

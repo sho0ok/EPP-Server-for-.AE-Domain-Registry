@@ -18,6 +18,7 @@ from epp_client.models import (
     DomainCheckItem,
     DomainInfo,
     DomainContact,
+    DomainEligibilityInfo,
     DomainCreateResult,
     DomainRenewResult,
     DomainTransferResult,
@@ -42,6 +43,7 @@ NS = {
     "domain": "urn:ietf:params:xml:ns:domain-1.0",
     "contact": "urn:ietf:params:xml:ns:contact-1.0",
     "host": "urn:ietf:params:xml:ns:host-1.0",
+    "aeEligibility": "urn:aeda:params:xml:ns:aeEligibility-1.0",
 }
 
 # Secure parser
@@ -216,6 +218,9 @@ class XMLParser:
         # Auth info
         auth_info = _find_text(info_data, "domain:authInfo/domain:pw")
 
+        # Parse extension data (AE eligibility)
+        eligibility = XMLParser._parse_ae_eligibility_extension(root)
+
         return DomainInfo(
             name=_find_text(info_data, "domain:name", ""),
             roid=_find_text(info_data, "domain:roid", ""),
@@ -232,6 +237,40 @@ class XMLParser:
             ex_date=_parse_datetime(_find_text(info_data, "domain:exDate")),
             tr_date=_parse_datetime(_find_text(info_data, "domain:trDate")),
             auth_info=auth_info,
+            eligibility=eligibility,
+        )
+
+    @staticmethod
+    def _parse_ae_eligibility_extension(root: etree._Element) -> Optional[DomainEligibilityInfo]:
+        """Parse AE eligibility extension from domain info response."""
+        # Look for extension element
+        extension = root.find(".//epp:extension", NS)
+        if extension is None:
+            return None
+
+        # Look for AE eligibility info in extension
+        ae_info = extension.find("aeEligibility:infData", NS)
+        if ae_info is None:
+            return None
+
+        # Parse policy reason as int if present
+        policy_reason_text = _find_text(ae_info, "aeEligibility:policyReason")
+        policy_reason = None
+        if policy_reason_text:
+            try:
+                policy_reason = int(policy_reason_text)
+            except ValueError:
+                pass
+
+        return DomainEligibilityInfo(
+            eligibility_type=_find_text(ae_info, "aeEligibility:eligibilityType"),
+            eligibility_name=_find_text(ae_info, "aeEligibility:eligibilityName"),
+            eligibility_id=_find_text(ae_info, "aeEligibility:eligibilityID"),
+            eligibility_id_type=_find_text(ae_info, "aeEligibility:eligibilityIDType"),
+            policy_reason=policy_reason,
+            registrant_id=_find_text(ae_info, "aeEligibility:registrantID"),
+            registrant_id_type=_find_text(ae_info, "aeEligibility:registrantIDType"),
+            registrant_name=_find_text(ae_info, "aeEligibility:registrantName"),
         )
 
     @staticmethod

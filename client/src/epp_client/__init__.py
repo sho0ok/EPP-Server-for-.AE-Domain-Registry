@@ -11,10 +11,12 @@ from epp_client.client import EPPClient
 from epp_client.async_client import AsyncEPPClient
 from epp_client.pool import EPPConnectionPool, PoolConfig, create_pool
 from epp_client.models import (
+    AEEligibility,
     Greeting,
     EPPResponse,
     DomainCheckResult,
     DomainInfo,
+    DomainEligibilityInfo,
     ContactCheckResult,
     ContactInfo,
     HostCheckResult,
@@ -45,10 +47,12 @@ __all__ = [
     "PoolConfig",
     "create_pool",
     # Models
+    "AEEligibility",
     "Greeting",
     "EPPResponse",
     "DomainCheckResult",
     "DomainInfo",
+    "DomainEligibilityInfo",
     "ContactCheckResult",
     "ContactInfo",
     "HostCheckResult",

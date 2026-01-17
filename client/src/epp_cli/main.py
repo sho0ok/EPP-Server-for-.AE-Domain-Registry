@@ -21,7 +21,7 @@ from epp_client.exceptions import (
     EPPObjectExists,
     EPPObjectNotFound,
 )
-from epp_client.models import StatusValue
+from epp_client.models import AEEligibility, StatusValue
 from epp_cli.config import CLIConfig, create_sample_config
 from epp_cli.output import OutputFormatter, print_error, print_info, print_success
 
@@ -323,13 +323,56 @@ def domain_info(ctx, name, auth_info):
 @click.option("--period", "-p", type=int, default=1, help="Registration period")
 @click.option("--period-unit", type=click.Choice(["y", "m"]), default="y", help="Period unit (y=year, m=month)")
 @click.option("--auth-info", help="Auth info (auto-generated if not provided)")
+# AE Eligibility extension options for restricted zones (.co.ae, .gov.ae, etc.)
+@click.option("--eligibility-type", help="Eligibility type (e.g., TradeLicense, Trademark)")
+@click.option("--eligibility-name", help="Eligibility name (company/organization name)")
+@click.option("--eligibility-id", help="Eligibility ID (license/trademark number)")
+@click.option("--eligibility-id-type", help="Eligibility ID type (e.g., TradeLicense, Trademark)")
+@click.option("--policy-reason", type=int, help="Policy reason (1-3)")
+@click.option("--registrant-id", help="Registrant ID (e.g., Emirates ID)")
+@click.option("--registrant-id-type", help="Registrant ID type (e.g., EmiratesID, Passport)")
+@click.option("--registrant-name", help="Registrant name")
 @click.pass_context
-def domain_create(ctx, name, registrant, admin, tech, billing, ns, period, period_unit, auth_info):
+def domain_create(ctx, name, registrant, admin, tech, billing, ns, period, period_unit, auth_info,
+                  eligibility_type, eligibility_name, eligibility_id, eligibility_id_type,
+                  policy_reason, registrant_id, registrant_id_type, registrant_name):
     """
     Create a new domain.
 
     NAME: Domain name to create.
+
+    For restricted zones (.co.ae, .gov.ae, .ac.ae, etc.), eligibility
+    extension data may be required:
+
+    \b
+    Examples:
+
+    \b
+    # Standard .ae domain
+    epp domain create example.ae --registrant contact123
+
+    \b
+    # Restricted .co.ae domain with eligibility
+    epp domain create example.co.ae --registrant contact123 \\
+        --eligibility-type TradeLicense \\
+        --eligibility-name "Example Company LLC" \\
+        --eligibility-id "123456" \\
+        --eligibility-id-type TradeLicense
     """
+    # Build AE eligibility extension if any eligibility options provided
+    ae_eligibility = None
+    if eligibility_type or eligibility_name:
+        ae_eligibility = AEEligibility(
+            eligibility_type=eligibility_type or "",
+            eligibility_name=eligibility_name or "",
+            eligibility_id=eligibility_id,
+            eligibility_id_type=eligibility_id_type,
+            policy_reason=policy_reason,
+            registrant_id=registrant_id,
+            registrant_id_type=registrant_id_type,
+            registrant_name=registrant_name,
+        )
+
     client = get_client(ctx)
     try:
         result = client.domain_create(
@@ -342,6 +385,7 @@ def domain_create(ctx, name, registrant, admin, tech, billing, ns, period, perio
             period=period,
             period_unit=period_unit,
             auth_info=auth_info,
+            ae_eligibility=ae_eligibility,
         )
         state.formatter.output(result)
         state.formatter.success(f"Domain created: {name}")

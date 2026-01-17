@@ -20,6 +20,7 @@ from epp_client.exceptions import (
 )
 from epp_client.framing import decode_frame_header, encode_frame, MAX_FRAME_SIZE
 from epp_client.models import (
+    AEEligibility,
     ContactCheckResult,
     ContactCreate,
     ContactCreateResult,
@@ -404,8 +405,22 @@ class AsyncEPPClient:
         billing: str = None,
         nameservers: List[str] = None,
         auth_info: str = None,
+        ae_eligibility: AEEligibility = None,
     ) -> DomainCreateResult:
-        """Create a domain."""
+        """Create a domain.
+
+        Args:
+            name: Domain name
+            registrant: Registrant contact ID
+            period: Registration period (default: 1)
+            period_unit: Period unit - y=year, m=month (default: y)
+            admin: Admin contact ID
+            tech: Tech contact ID
+            billing: Billing contact ID
+            nameservers: List of nameserver hostnames
+            auth_info: Auth info (auto-generated if not provided)
+            ae_eligibility: AE eligibility extension data for restricted zones
+        """
         if auth_info is None:
             auth_info = self._generate_auth_info()
 
@@ -419,6 +434,7 @@ class AsyncEPPClient:
             billing=billing,
             nameservers=nameservers or [],
             auth_info=auth_info,
+            ae_eligibility=ae_eligibility,
         )
 
         xml = XMLBuilder.build_domain_create(

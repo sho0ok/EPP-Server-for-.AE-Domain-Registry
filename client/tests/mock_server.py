@@ -149,6 +149,50 @@ DOMAIN_INFO_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
+# Domain info response for restricted zones (includes AE eligibility extension)
+DOMAIN_INFO_RESTRICTED_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
+    </result>
+    <resData>
+      <domain:infData xmlns:domain="urn:ietf:params:xml:ns:domain-1.0">
+        <domain:name>%s</domain:name>
+        <domain:roid>DOM123-TEST</domain:roid>
+        <domain:status s="ok"/>
+        <domain:registrant>REG001</domain:registrant>
+        <domain:contact type="admin">ADM001</domain:contact>
+        <domain:contact type="tech">TCH001</domain:contact>
+        <domain:ns>
+          <domain:hostObj>ns1.example.test</domain:hostObj>
+          <domain:hostObj>ns2.example.test</domain:hostObj>
+        </domain:ns>
+        <domain:clID>testregistrar</domain:clID>
+        <domain:crID>testregistrar</domain:crID>
+        <domain:crDate>2024-01-01T00:00:00Z</domain:crDate>
+        <domain:exDate>2025-01-01T00:00:00Z</domain:exDate>
+        <domain:authInfo>
+          <domain:pw>auth123</domain:pw>
+        </domain:authInfo>
+      </domain:infData>
+    </resData>
+    <extension>
+      <aeEligibility:infData xmlns:aeEligibility="urn:aeda:params:xml:ns:aeEligibility-1.0">
+        <aeEligibility:eligibilityType>TradeLicense</aeEligibility:eligibilityType>
+        <aeEligibility:eligibilityName>Example Company LLC</aeEligibility:eligibilityName>
+        <aeEligibility:eligibilityID>123456</aeEligibility:eligibilityID>
+        <aeEligibility:eligibilityIDType>TradeLicense</aeEligibility:eligibilityIDType>
+        <aeEligibility:policyReason>1</aeEligibility:policyReason>
+      </aeEligibility:infData>
+    </extension>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
 DOMAIN_CREATE_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
   <response>
@@ -622,6 +666,11 @@ class MockEPPServer:
 
         elif cmd_type == "domain_info":
             domain = extract_domain_name(xml_data)
+            # Check if domain is in a restricted zone that requires eligibility
+            restricted_zones = ['.co.ae', '.gov.ae', '.ac.ae', '.sch.ae', '.mil.ae', '.net.ae', '.org.ae']
+            is_restricted = any(domain.lower().endswith(zone) for zone in restricted_zones)
+            if is_restricted:
+                return DOMAIN_INFO_RESTRICTED_RESPONSE % (domain.encode(), cltrid, svtrid)
             return DOMAIN_INFO_RESPONSE % (domain.encode(), cltrid, svtrid)
 
         elif cmd_type == "domain_create":

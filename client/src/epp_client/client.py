@@ -18,6 +18,7 @@ from epp_client.exceptions import (
     EPPObjectNotFound,
 )
 from epp_client.models import (
+    AEEligibility,
     ContactCheckResult,
     ContactCreate,
     ContactCreateResult,
@@ -473,6 +474,7 @@ class EPPClient:
         billing: str = None,
         nameservers: List[str] = None,
         auth_info: str = None,
+        ae_eligibility: AEEligibility = None,
     ) -> DomainCreateResult:
         """
         Create a domain.
@@ -487,6 +489,8 @@ class EPPClient:
             billing: Billing contact ID
             nameservers: List of nameserver hostnames
             auth_info: Auth info (auto-generated if not provided)
+            ae_eligibility: AE eligibility extension data for restricted zones
+                           (.co.ae, .gov.ae, .ac.ae, etc.)
 
         Returns:
             Domain create result
@@ -508,6 +512,7 @@ class EPPClient:
             billing=billing,
             nameservers=nameservers or [],
             auth_info=auth_info,
+            ae_eligibility=ae_eligibility,
         )
 
         xml = XMLBuilder.build_domain_create(
