@@ -7,7 +7,7 @@ High-level EPP client for domain registry operations.
 import logging
 import secrets
 import string
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from epp_client.connection import EPPConnection
 from epp_client.exceptions import (
@@ -354,12 +354,12 @@ class EPPClient:
     # Poll Commands
     # =========================================================================
 
-    def poll_request(self) -> Optional[PollMessage]:
+    def poll_request(self) -> Tuple[EPPResponse, Optional[PollMessage]]:
         """
         Request next poll message.
 
         Returns:
-            Poll message or None if queue is empty
+            Tuple of (EPPResponse, PollMessage or None if queue is empty)
 
         Raises:
             EPPCommandError: If command fails
@@ -370,10 +370,11 @@ class EPPClient:
 
         # 1301 = no messages
         if response.code == 1301:
-            return None
+            return response, None
 
         self._check_response(response)
-        return XMLParser.parse_poll_message(response_xml)
+        message = XMLParser.parse_poll_message(response_xml)
+        return response, message
 
     def poll_ack(self, msg_id: str) -> EPPResponse:
         """
