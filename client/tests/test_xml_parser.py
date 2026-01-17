@@ -5,7 +5,7 @@ Tests for EPP XML parser module.
 import pytest
 from datetime import datetime
 from epp_client.xml_parser import XMLParser
-from epp_client.exceptions import EPPParseError
+from epp_client.exceptions import EPPXMLError
 
 
 class TestParseGreeting:
