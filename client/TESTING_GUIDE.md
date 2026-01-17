@@ -124,10 +124,18 @@ epptest domain update example.ae --registrant NEWREG001
 # Add status
 epptest domain update example.ae --add-status clientHold
 
+# Add status with reason/comment
+epptest domain update example.ae --add-status clientHold --add-status-reason "Payment pending"
+
+# Multiple statuses with reasons
+epptest domain update example.ae \
+    --add-status clientHold --add-status-reason "Under investigation" \
+    --add-status clientTransferProhibited --add-status-reason "Legal dispute"
+
 # Remove status
 epptest domain update example.ae --rem-status clientHold
 
-# Add multiple statuses
+# Add multiple statuses (without reasons)
 epptest domain update example.ae --add-status clientHold --add-status clientTransferProhibited
 ```
 
@@ -142,6 +150,21 @@ Registrars can set these client-side statuses:
 | `clientUpdateProhibited` | Prevents domain updates |
 | `clientDeleteProhibited` | Prevents domain deletion |
 | `clientRenewProhibited` | Prevents domain renewal |
+
+#### Status Reasons
+
+You can add a reason/comment when setting a status. This is useful for tracking why a hold was placed:
+
+```bash
+# Common reasons
+epptest domain update example.ae --add-status clientHold --add-status-reason "Payment pending"
+epptest domain update example.ae --add-status clientHold --add-status-reason "Under investigation"
+epptest domain update example.ae --add-status clientHold --add-status-reason "Trademark dispute"
+epptest domain update example.ae --add-status clientHold --add-status-reason "Account suspended"
+
+# Arabic reason
+epptest domain update مثال.امارات --add-status clientHold --add-status-reason "قيد التحقيق"
+```
 
 ### Renew Domain
 
@@ -502,7 +525,7 @@ try:
     )
     print(f"Update: {response.code} - {response.message}")
 
-    # 4b. Update - add clientHold status
+    # 4b. Update - add clientHold status (simple)
     print("\n=== Update (add clientHold) ===")
     response = client.domain_update(
         name="lifecycle-test.ae",
@@ -510,7 +533,16 @@ try:
     )
     print(f"Update: {response.code} - {response.message}")
 
-    # 4c. Update - remove clientHold status
+    # 4c. Update - add clientHold with reason
+    from epp_client import StatusValue
+    print("\n=== Update (add clientHold with reason) ===")
+    response = client.domain_update(
+        name="lifecycle-test.ae",
+        add_status=[StatusValue("clientHold", "Payment pending")],
+    )
+    print(f"Update: {response.code} - {response.message}")
+
+    # 4d. Update - remove clientHold status
     print("\n=== Update (remove clientHold) ===")
     response = client.domain_update(
         name="lifecycle-test.ae",

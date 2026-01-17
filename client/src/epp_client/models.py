@@ -6,7 +6,23 @@ Data classes for EPP requests and responses.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+
+
+# =============================================================================
+# Common Models
+# =============================================================================
+
+@dataclass
+class StatusValue:
+    """Status with optional comment/reason.
+
+    Per RFC 5731, status can include an optional description text.
+    Example: clientHold with reason "Payment pending"
+    """
+    status: str
+    reason: Optional[str] = None
+    lang: str = "en"
 
 
 # =============================================================================
@@ -288,10 +304,15 @@ class DomainCreate:
 
 @dataclass
 class DomainUpdate:
-    """Domain update request."""
+    """Domain update request.
+
+    Status can be specified as:
+    - Simple string: "clientHold"
+    - StatusValue with reason: StatusValue("clientHold", "Payment pending")
+    """
     name: str
-    add_status: List[str] = field(default_factory=list)
-    rem_status: List[str] = field(default_factory=list)
+    add_status: List[Union[str, StatusValue]] = field(default_factory=list)
+    rem_status: List[Union[str, StatusValue]] = field(default_factory=list)
     add_ns: List[str] = field(default_factory=list)
     rem_ns: List[str] = field(default_factory=list)
     add_contacts: List[DomainContact] = field(default_factory=list)

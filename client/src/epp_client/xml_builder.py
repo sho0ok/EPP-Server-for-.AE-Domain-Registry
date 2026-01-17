@@ -21,6 +21,7 @@ from epp_client.models import (
     HostCreate,
     HostUpdate,
     HostAddress,
+    StatusValue,
 )
 
 # EPP Namespaces
@@ -388,7 +389,13 @@ class XMLBuilder:
                 c.set("type", contact.type)
             for status in update_data.add_status:
                 s = etree.SubElement(add, "{%s}status" % DOMAIN_NS)
-                s.set("s", status)
+                if isinstance(status, StatusValue):
+                    s.set("s", status.status)
+                    if status.reason:
+                        s.set("lang", status.lang)
+                        s.text = status.reason
+                else:
+                    s.set("s", status)
 
         # Remove section
         if update_data.rem_ns or update_data.rem_contacts or update_data.rem_status:
@@ -403,7 +410,10 @@ class XMLBuilder:
                 c.set("type", contact.type)
             for status in update_data.rem_status:
                 s = etree.SubElement(rem, "{%s}status" % DOMAIN_NS)
-                s.set("s", status)
+                if isinstance(status, StatusValue):
+                    s.set("s", status.status)
+                else:
+                    s.set("s", status)
 
         # Change section
         if update_data.new_registrant or update_data.new_auth_info:

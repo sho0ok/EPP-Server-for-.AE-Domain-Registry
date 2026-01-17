@@ -38,6 +38,7 @@ from epp_client.models import (
     HostInfo,
     HostUpdate,
     PollMessage,
+    StatusValue,
 )
 from epp_client.xml_builder import XMLBuilder
 from epp_client.xml_parser import XMLParser
@@ -714,8 +715,8 @@ class EPPClient:
         name: str,
         add_ns: List[str] = None,
         rem_ns: List[str] = None,
-        add_status: List[str] = None,
-        rem_status: List[str] = None,
+        add_status: List = None,
+        rem_status: List = None,
         new_registrant: str = None,
         new_auth_info: str = None,
     ) -> EPPResponse:
@@ -726,8 +727,9 @@ class EPPClient:
             name: Domain name
             add_ns: Nameservers to add
             rem_ns: Nameservers to remove
-            add_status: Status values to add
-            rem_status: Status values to remove
+            add_status: Status values to add. Can be strings or StatusValue objects.
+                       Example: ["clientHold"] or [StatusValue("clientHold", "Payment pending")]
+            rem_status: Status values to remove. Can be strings or StatusValue objects.
             new_registrant: New registrant contact ID
             new_auth_info: New auth info
 

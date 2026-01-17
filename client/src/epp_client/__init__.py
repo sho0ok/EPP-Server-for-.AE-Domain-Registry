@@ -23,6 +23,7 @@ from epp_client.models import (
     ContactCreate,
     HostCreate,
     PostalInfo,
+    StatusValue,
 )
 from epp_client.exceptions import (
     EPPError,
@@ -56,6 +57,7 @@ __all__ = [
     "ContactCreate",
     "HostCreate",
     "PostalInfo",
+    "StatusValue",
     # Exceptions
     "EPPError",
     "EPPConnectionError",

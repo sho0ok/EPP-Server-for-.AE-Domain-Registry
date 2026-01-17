@@ -21,6 +21,7 @@ from epp_client.exceptions import (
     EPPObjectExists,
     EPPObjectNotFound,
 )
+from epp_client.models import StatusValue
 from epp_cli.config import CLIConfig, create_sample_config
 from epp_cli.output import OutputFormatter, print_error, print_info, print_success
 
@@ -461,24 +462,50 @@ def domain_transfer(ctx, name, operation, auth_info, period):
 @click.argument("name")
 @click.option("--add-ns", multiple=True, help="Add nameserver")
 @click.option("--rem-ns", multiple=True, help="Remove nameserver")
-@click.option("--add-status", multiple=True, help="Add status")
+@click.option("--add-status", multiple=True, help="Add status (e.g., clientHold)")
+@click.option("--add-status-reason", multiple=True, help="Reason for add-status (same order as --add-status)")
 @click.option("--rem-status", multiple=True, help="Remove status")
 @click.option("--registrant", help="New registrant contact ID")
 @click.option("--auth-info", help="New auth info")
 @click.pass_context
-def domain_update(ctx, name, add_ns, rem_ns, add_status, rem_status, registrant, auth_info):
+def domain_update(ctx, name, add_ns, rem_ns, add_status, add_status_reason, rem_status, registrant, auth_info):
     """
     Update a domain.
 
     NAME: Domain name to update.
+
+    Examples:
+
+    \b
+    # Add clientHold without reason
+    epp domain update example.ae --add-status clientHold
+
+    \b
+    # Add clientHold with reason
+    epp domain update example.ae --add-status clientHold --add-status-reason "Payment pending"
+
+    \b
+    # Multiple statuses with reasons
+    epp domain update example.ae --add-status clientHold --add-status-reason "Under investigation" --add-status clientTransferProhibited --add-status-reason "Dispute"
     """
     client = get_client(ctx)
     try:
+        # Build status list with optional reasons
+        status_list = None
+        if add_status:
+            status_list = []
+            reasons = list(add_status_reason) if add_status_reason else []
+            for i, status in enumerate(add_status):
+                if i < len(reasons) and reasons[i]:
+                    status_list.append(StatusValue(status, reasons[i]))
+                else:
+                    status_list.append(status)
+
         client.domain_update(
             name=name,
             add_ns=list(add_ns) if add_ns else None,
             rem_ns=list(rem_ns) if rem_ns else None,
-            add_status=list(add_status) if add_status else None,
+            add_status=status_list,
             rem_status=list(rem_status) if rem_status else None,
             new_registrant=registrant,
             new_auth_info=auth_info,
