@@ -2,7 +2,7 @@
 """
 Mock EPP Server for Testing
 
-A simple mock EPP server that responds to basic EPP commands.
+A comprehensive mock EPP server that responds to ALL EPP commands.
 Used for testing the EPP client without a real registry connection.
 """
 
@@ -10,7 +10,8 @@ import asyncio
 import logging
 import ssl
 import struct
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +57,19 @@ SUCCESS_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
+PENDING_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1001">
+      <msg>Command completed successfully; action pending</msg>
+    </result>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
 LOGOUT_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
   <response>
@@ -69,6 +83,20 @@ LOGOUT_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
+AUTH_ERROR_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="2200">
+      <msg>Authentication error</msg>
+    </result>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
+# Domain responses
 DOMAIN_CHECK_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
   <response>
@@ -109,6 +137,9 @@ DOMAIN_INFO_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
         <domain:crID>testregistrar</domain:crID>
         <domain:crDate>2024-01-01T00:00:00Z</domain:crDate>
         <domain:exDate>2025-01-01T00:00:00Z</domain:exDate>
+        <domain:authInfo>
+          <domain:pw>auth123</domain:pw>
+        </domain:authInfo>
       </domain:infData>
     </resData>
     <trID>
@@ -118,12 +149,19 @@ DOMAIN_INFO_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
-AUTH_ERROR_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+DOMAIN_CREATE_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
   <response>
-    <result code="2200">
-      <msg>Authentication error</msg>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
     </result>
+    <resData>
+      <domain:creData xmlns:domain="urn:ietf:params:xml:ns:domain-1.0">
+        <domain:name>%s</domain:name>
+        <domain:crDate>%s</domain:crDate>
+        <domain:exDate>%s</domain:exDate>
+      </domain:creData>
+    </resData>
     <trID>
       <clTRID>%s</clTRID>
       <svTRID>MOCK-SRV-%s</svTRID>
@@ -131,6 +169,50 @@ AUTH_ERROR_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
+DOMAIN_RENEW_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
+    </result>
+    <resData>
+      <domain:renData xmlns:domain="urn:ietf:params:xml:ns:domain-1.0">
+        <domain:name>%s</domain:name>
+        <domain:exDate>%s</domain:exDate>
+      </domain:renData>
+    </resData>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
+DOMAIN_TRANSFER_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1001">
+      <msg>Command completed successfully; action pending</msg>
+    </result>
+    <resData>
+      <domain:trnData xmlns:domain="urn:ietf:params:xml:ns:domain-1.0">
+        <domain:name>%s</domain:name>
+        <domain:trStatus>pending</domain:trStatus>
+        <domain:reID>newregistrar</domain:reID>
+        <domain:reDate>%s</domain:reDate>
+        <domain:acID>testregistrar</domain:acID>
+        <domain:acDate>%s</domain:acDate>
+        <domain:exDate>%s</domain:exDate>
+      </domain:trnData>
+    </resData>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
+# Contact responses
 CONTACT_CHECK_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
   <response>
@@ -149,6 +231,66 @@ CONTACT_CHECK_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
+CONTACT_INFO_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
+    </result>
+    <resData>
+      <contact:infData xmlns:contact="urn:ietf:params:xml:ns:contact-1.0">
+        <contact:id>%s</contact:id>
+        <contact:roid>CON123-TEST</contact:roid>
+        <contact:status s="ok"/>
+        <contact:postalInfo type="int">
+          <contact:name>Test Contact</contact:name>
+          <contact:org>Test Organization</contact:org>
+          <contact:addr>
+            <contact:street>123 Test Street</contact:street>
+            <contact:city>Test City</contact:city>
+            <contact:sp>Test State</contact:sp>
+            <contact:pc>12345</contact:pc>
+            <contact:cc>AE</contact:cc>
+          </contact:addr>
+        </contact:postalInfo>
+        <contact:voice>+971.41234567</contact:voice>
+        <contact:fax>+971.41234568</contact:fax>
+        <contact:email>test@example.ae</contact:email>
+        <contact:clID>testregistrar</contact:clID>
+        <contact:crID>testregistrar</contact:crID>
+        <contact:crDate>2024-01-01T00:00:00Z</contact:crDate>
+        <contact:authInfo>
+          <contact:pw>auth123</contact:pw>
+        </contact:authInfo>
+      </contact:infData>
+    </resData>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
+CONTACT_CREATE_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
+    </result>
+    <resData>
+      <contact:creData xmlns:contact="urn:ietf:params:xml:ns:contact-1.0">
+        <contact:id>%s</contact:id>
+        <contact:crDate>%s</contact:crDate>
+      </contact:creData>
+    </resData>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
+# Host responses
 HOST_CHECK_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
   <response>
@@ -167,6 +309,50 @@ HOST_CHECK_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
   </response>
 </epp>"""
 
+HOST_INFO_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
+    </result>
+    <resData>
+      <host:infData xmlns:host="urn:ietf:params:xml:ns:host-1.0">
+        <host:name>%s</host:name>
+        <host:roid>HOST123-TEST</host:roid>
+        <host:status s="ok"/>
+        <host:addr ip="v4">192.0.2.1</host:addr>
+        <host:addr ip="v6">2001:db8::1</host:addr>
+        <host:clID>testregistrar</host:clID>
+        <host:crID>testregistrar</host:crID>
+        <host:crDate>2024-01-01T00:00:00Z</host:crDate>
+      </host:infData>
+    </resData>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
+HOST_CREATE_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<epp xmlns="urn:ietf:params:xml:ns:epp-1.0">
+  <response>
+    <result code="1000">
+      <msg>Command completed successfully</msg>
+    </result>
+    <resData>
+      <host:creData xmlns:host="urn:ietf:params:xml:ns:host-1.0">
+        <host:name>%s</host:name>
+        <host:crDate>%s</host:crDate>
+      </host:creData>
+    </resData>
+    <trID>
+      <clTRID>%s</clTRID>
+      <svTRID>MOCK-SRV-%s</svTRID>
+    </trID>
+  </response>
+</epp>"""
+
 
 def frame_message(data: bytes) -> bytes:
     """Add EPP framing (4-byte length prefix)."""
@@ -176,18 +362,14 @@ def frame_message(data: bytes) -> bytes:
 
 async def read_frame(reader: asyncio.StreamReader) -> bytes:
     """Read an EPP frame from the stream."""
-    # Read 4-byte length
     length_bytes = await reader.readexactly(4)
     length = struct.unpack(">I", length_bytes)[0]
-
-    # Read payload (length includes the 4-byte header)
     payload = await reader.readexactly(length - 4)
     return payload
 
 
 def extract_cltrid(xml_data: bytes) -> bytes:
     """Extract clTRID from XML command."""
-    import re
     match = re.search(rb"<clTRID>([^<]+)</clTRID>", xml_data)
     if match:
         return match.group(1)
@@ -198,61 +380,132 @@ def extract_command_type(xml_data: bytes) -> str:
     """Determine command type from XML."""
     xml_str = xml_data.decode("utf-8", errors="replace").lower()
 
+    # Session commands
     if "<login" in xml_str:
         return "login"
     elif "<logout" in xml_str:
         return "logout"
     elif "<hello" in xml_str:
         return "hello"
+    elif "<poll op=\"req\"" in xml_str or "<poll op='req'" in xml_str:
+        return "poll_req"
+    elif "<poll op=\"ack\"" in xml_str or "<poll op='ack'" in xml_str:
+        return "poll_ack"
+
+    # Domain commands
     elif "domain:check" in xml_str:
         return "domain_check"
     elif "domain:info" in xml_str:
         return "domain_info"
+    elif "domain:create" in xml_str:
+        return "domain_create"
+    elif "domain:delete" in xml_str:
+        return "domain_delete"
+    elif "domain:renew" in xml_str:
+        return "domain_renew"
+    elif "domain:update" in xml_str:
+        return "domain_update"
+    elif "domain:transfer" in xml_str:
+        if 'op="request"' in xml_str or "op='request'" in xml_str:
+            return "domain_transfer_request"
+        elif 'op="query"' in xml_str or "op='query'" in xml_str:
+            return "domain_transfer_query"
+        elif 'op="approve"' in xml_str or "op='approve'" in xml_str:
+            return "domain_transfer_approve"
+        elif 'op="reject"' in xml_str or "op='reject'" in xml_str:
+            return "domain_transfer_reject"
+        elif 'op="cancel"' in xml_str or "op='cancel'" in xml_str:
+            return "domain_transfer_cancel"
+        return "domain_transfer"
+
+    # Contact commands
     elif "contact:check" in xml_str:
         return "contact_check"
+    elif "contact:info" in xml_str:
+        return "contact_info"
+    elif "contact:create" in xml_str:
+        return "contact_create"
+    elif "contact:delete" in xml_str:
+        return "contact_delete"
+    elif "contact:update" in xml_str:
+        return "contact_update"
+
+    # Host commands
     elif "host:check" in xml_str:
         return "host_check"
-    else:
-        return "unknown"
+    elif "host:info" in xml_str:
+        return "host_info"
+    elif "host:create" in xml_str:
+        return "host_create"
+    elif "host:delete" in xml_str:
+        return "host_delete"
+    elif "host:update" in xml_str:
+        return "host_update"
+
+    return "unknown"
 
 
 def extract_domain_names(xml_data: bytes) -> list:
     """Extract domain names from check command."""
-    import re
     matches = re.findall(rb"<domain:name>([^<]+)</domain:name>", xml_data)
     return [m.decode("utf-8") for m in matches]
 
 
+def extract_domain_name(xml_data: bytes) -> str:
+    """Extract single domain name."""
+    match = re.search(rb"<domain:name[^>]*>([^<]+)</domain:name>", xml_data)
+    return match.group(1).decode("utf-8") if match else "unknown.test"
+
+
 def extract_contact_ids(xml_data: bytes) -> list:
     """Extract contact IDs from check command."""
-    import re
     matches = re.findall(rb"<contact:id>([^<]+)</contact:id>", xml_data)
     return [m.decode("utf-8") for m in matches]
 
 
+def extract_contact_id(xml_data: bytes) -> str:
+    """Extract single contact ID."""
+    match = re.search(rb"<contact:id>([^<]+)</contact:id>", xml_data)
+    return match.group(1).decode("utf-8") if match else "unknown"
+
+
 def extract_host_names(xml_data: bytes) -> list:
     """Extract host names from check command."""
-    import re
     matches = re.findall(rb"<host:name>([^<]+)</host:name>", xml_data)
     return [m.decode("utf-8") for m in matches]
 
 
+def extract_host_name(xml_data: bytes) -> str:
+    """Extract single host name."""
+    match = re.search(rb"<host:name>([^<]+)</host:name>", xml_data)
+    return match.group(1).decode("utf-8") if match else "unknown.test"
+
+
 def check_login_credentials(xml_data: bytes) -> bool:
     """Check if login credentials are valid (mock)."""
-    import re
     clid_match = re.search(rb"<clID>([^<]+)</clID>", xml_data)
     pw_match = re.search(rb"<pw>([^<]+)</pw>", xml_data)
 
     if clid_match and pw_match:
         client_id = clid_match.group(1).decode("utf-8")
         password = pw_match.group(1).decode("utf-8")
-        # Accept any non-empty credentials for testing
         return len(client_id) > 0 and len(password) > 0
     return False
 
 
+def get_timestamp() -> bytes:
+    """Get current UTC timestamp."""
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ").encode()
+
+
+def get_future_date(years: int = 1) -> bytes:
+    """Get future date."""
+    future = datetime.utcnow() + timedelta(days=365 * years)
+    return future.strftime("%Y-%m-%dT%H:%M:%SZ").encode()
+
+
 class MockEPPServer:
-    """Mock EPP server for testing."""
+    """Comprehensive mock EPP server for testing."""
 
     def __init__(self, host: str = "localhost", port: int = 7700):
         self.host = host
@@ -264,19 +517,12 @@ class MockEPPServer:
         """Create SSL context for server."""
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-
-        # Load server certificate and key
         context.load_cert_chain(
             certfile=CERT_DIR / "server.crt",
             keyfile=CERT_DIR / "server.key"
         )
-
-        # Load CA for client verification
         context.load_verify_locations(cafile=CERT_DIR / "ca.crt")
-
-        # Require client certificate
         context.verify_mode = ssl.CERT_REQUIRED
-
         return context
 
     async def handle_client(
@@ -291,7 +537,7 @@ class MockEPPServer:
 
         try:
             # Send greeting
-            greeting = GREETING_XML % datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ").encode()
+            greeting = GREETING_XML % get_timestamp()
             writer.write(frame_message(greeting))
             await writer.drain()
             logger.info(f"Sent greeting to {peername}")
@@ -313,77 +559,20 @@ class MockEPPServer:
 
                 logger.info(f"Received command: {cmd_type} from {peername}")
 
-                # Process command
-                if cmd_type == "hello":
-                    greeting = GREETING_XML % datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ").encode()
-                    response = greeting
+                response = self.process_command(cmd_type, xml_data, cltrid, svtrid, session_id)
 
-                elif cmd_type == "login":
-                    if check_login_credentials(xml_data):
-                        self.authenticated_sessions.add(session_id)
-                        response = SUCCESS_RESPONSE % (cltrid, svtrid)
-                        logger.info(f"Login successful for {peername}")
-                    else:
-                        response = AUTH_ERROR_RESPONSE % (cltrid, svtrid)
-                        logger.warning(f"Login failed for {peername}")
-
-                elif cmd_type == "logout":
-                    self.authenticated_sessions.discard(session_id)
-                    response = LOGOUT_RESPONSE % (cltrid, svtrid)
+                if cmd_type == "logout":
                     writer.write(frame_message(response))
                     await writer.drain()
-                    logger.info(f"Logout: {peername}")
                     break
-
-                elif cmd_type == "domain_check":
-                    domains = extract_domain_names(xml_data)
-                    check_results = []
-                    for domain in domains:
-                        # Simulate: domains starting with "taken" are not available
-                        avail = "0" if domain.startswith("taken") else "1"
-                        check_results.append(
-                            f'<domain:cd><domain:name avail="{avail}">{domain}</domain:name></domain:cd>'
-                        )
-                    results_xml = "\n        ".join(check_results).encode()
-                    response = DOMAIN_CHECK_RESPONSE % (results_xml, cltrid, svtrid)
-
-                elif cmd_type == "domain_info":
-                    import re
-                    match = re.search(rb"<domain:name[^>]*>([^<]+)</domain:name>", xml_data)
-                    domain = match.group(1) if match else b"unknown.test"
-                    response = DOMAIN_INFO_RESPONSE % (domain, cltrid, svtrid)
-
-                elif cmd_type == "contact_check":
-                    contacts = extract_contact_ids(xml_data)
-                    check_results = []
-                    for contact in contacts:
-                        avail = "0" if contact.startswith("taken") else "1"
-                        check_results.append(
-                            f'<contact:cd><contact:id avail="{avail}">{contact}</contact:id></contact:cd>'
-                        )
-                    results_xml = "\n        ".join(check_results).encode()
-                    response = CONTACT_CHECK_RESPONSE % (results_xml, cltrid, svtrid)
-
-                elif cmd_type == "host_check":
-                    hosts = extract_host_names(xml_data)
-                    check_results = []
-                    for host in hosts:
-                        avail = "0" if host.startswith("taken") else "1"
-                        check_results.append(
-                            f'<host:cd><host:name avail="{avail}">{host}</host:name></host:cd>'
-                        )
-                    results_xml = "\n        ".join(check_results).encode()
-                    response = HOST_CHECK_RESPONSE % (results_xml, cltrid, svtrid)
-
-                else:
-                    # Generic success for other commands
-                    response = SUCCESS_RESPONSE % (cltrid, svtrid)
 
                 writer.write(frame_message(response))
                 await writer.drain()
 
         except Exception as e:
             logger.error(f"Error handling client {peername}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.authenticated_sessions.discard(session_id)
             writer.close()
@@ -392,6 +581,134 @@ class MockEPPServer:
             except Exception:
                 pass
             logger.info(f"Client disconnected: {peername}")
+
+    def process_command(self, cmd_type: str, xml_data: bytes, cltrid: bytes, svtrid: bytes, session_id: int) -> bytes:
+        """Process EPP command and return response."""
+
+        # Session commands
+        if cmd_type == "hello":
+            return GREETING_XML % get_timestamp()
+
+        elif cmd_type == "login":
+            if check_login_credentials(xml_data):
+                self.authenticated_sessions.add(session_id)
+                logger.info("Login successful")
+                return SUCCESS_RESPONSE % (cltrid, svtrid)
+            else:
+                logger.warning("Login failed")
+                return AUTH_ERROR_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type == "logout":
+            self.authenticated_sessions.discard(session_id)
+            return LOGOUT_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type == "poll_req":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type == "poll_ack":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        # Domain commands
+        elif cmd_type == "domain_check":
+            domains = extract_domain_names(xml_data)
+            check_results = []
+            for domain in domains:
+                avail = "0" if domain.startswith("taken") else "1"
+                check_results.append(
+                    f'<domain:cd><domain:name avail="{avail}">{domain}</domain:name></domain:cd>'
+                )
+            results_xml = "\n        ".join(check_results).encode()
+            return DOMAIN_CHECK_RESPONSE % (results_xml, cltrid, svtrid)
+
+        elif cmd_type == "domain_info":
+            domain = extract_domain_name(xml_data)
+            return DOMAIN_INFO_RESPONSE % (domain.encode(), cltrid, svtrid)
+
+        elif cmd_type == "domain_create":
+            domain = extract_domain_name(xml_data)
+            cr_date = get_timestamp()
+            ex_date = get_future_date(1)
+            return DOMAIN_CREATE_RESPONSE % (domain.encode(), cr_date, ex_date, cltrid, svtrid)
+
+        elif cmd_type == "domain_delete":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type == "domain_renew":
+            domain = extract_domain_name(xml_data)
+            ex_date = get_future_date(2)
+            return DOMAIN_RENEW_RESPONSE % (domain.encode(), ex_date, cltrid, svtrid)
+
+        elif cmd_type == "domain_update":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type in ("domain_transfer_request", "domain_transfer_query", "domain_transfer"):
+            domain = extract_domain_name(xml_data)
+            re_date = get_timestamp()
+            ac_date = get_future_date(0)  # 5 days later typically
+            ex_date = get_future_date(1)
+            return DOMAIN_TRANSFER_RESPONSE % (domain.encode(), re_date, ac_date, ex_date, cltrid, svtrid)
+
+        elif cmd_type in ("domain_transfer_approve", "domain_transfer_reject", "domain_transfer_cancel"):
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        # Contact commands
+        elif cmd_type == "contact_check":
+            contacts = extract_contact_ids(xml_data)
+            check_results = []
+            for contact in contacts:
+                avail = "0" if contact.startswith("taken") else "1"
+                check_results.append(
+                    f'<contact:cd><contact:id avail="{avail}">{contact}</contact:id></contact:cd>'
+                )
+            results_xml = "\n        ".join(check_results).encode()
+            return CONTACT_CHECK_RESPONSE % (results_xml, cltrid, svtrid)
+
+        elif cmd_type == "contact_info":
+            contact_id = extract_contact_id(xml_data)
+            return CONTACT_INFO_RESPONSE % (contact_id.encode(), cltrid, svtrid)
+
+        elif cmd_type == "contact_create":
+            contact_id = extract_contact_id(xml_data)
+            cr_date = get_timestamp()
+            return CONTACT_CREATE_RESPONSE % (contact_id.encode(), cr_date, cltrid, svtrid)
+
+        elif cmd_type == "contact_delete":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type == "contact_update":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        # Host commands
+        elif cmd_type == "host_check":
+            hosts = extract_host_names(xml_data)
+            check_results = []
+            for host in hosts:
+                avail = "0" if host.startswith("taken") else "1"
+                check_results.append(
+                    f'<host:cd><host:name avail="{avail}">{host}</host:name></host:cd>'
+                )
+            results_xml = "\n        ".join(check_results).encode()
+            return HOST_CHECK_RESPONSE % (results_xml, cltrid, svtrid)
+
+        elif cmd_type == "host_info":
+            host_name = extract_host_name(xml_data)
+            return HOST_INFO_RESPONSE % (host_name.encode(), cltrid, svtrid)
+
+        elif cmd_type == "host_create":
+            host_name = extract_host_name(xml_data)
+            cr_date = get_timestamp()
+            return HOST_CREATE_RESPONSE % (host_name.encode(), cr_date, cltrid, svtrid)
+
+        elif cmd_type == "host_delete":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        elif cmd_type == "host_update":
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
+
+        # Unknown command - return generic success
+        else:
+            logger.warning(f"Unknown command type: {cmd_type}")
+            return SUCCESS_RESPONSE % (cltrid, svtrid)
 
     async def start(self):
         """Start the mock server."""

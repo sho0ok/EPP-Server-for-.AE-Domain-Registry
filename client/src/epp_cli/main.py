@@ -556,13 +556,13 @@ def contact_info(ctx, id, auth_info):
 @click.option("--country", "-C", required=True, help="Country code (2-letter)")
 @click.option("--org", "-o", help="Organization")
 @click.option("--street", "-s", multiple=True, help="Street address (can specify multiple)")
-@click.option("--state", "-S", help="State/province")
+@click.option("--state", "-S", "state_province", help="State/province")
 @click.option("--postal-code", "-z", help="Postal/ZIP code")
 @click.option("--voice", "-v", help="Phone number")
 @click.option("--fax", "-f", help="Fax number")
 @click.option("--auth-info", help="Auth info (auto-generated if not provided)")
 @click.pass_context
-def contact_create(ctx, id, name, email, city, country, org, street, state, postal_code, voice, fax, auth_info):
+def contact_create(ctx, id, name, email, city, country, org, street, state_province, postal_code, voice, fax, auth_info):
     """
     Create a new contact.
 
@@ -578,7 +578,7 @@ def contact_create(ctx, id, name, email, city, country, org, street, state, post
             country_code=country,
             org=org,
             street=list(street) if street else None,
-            state=state,
+            state=state_province,
             postal_code=postal_code,
             voice=voice,
             fax=fax,
