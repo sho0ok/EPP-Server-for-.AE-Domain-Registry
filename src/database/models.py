@@ -271,7 +271,7 @@ class Zone:
     """ZONES table - TLD configuration"""
     ZON_ZONE: str  # Primary Key (e.g., "ae", "com.ae")
     ZON_ID: int  # Unique ID
-    ZON_STATUS: str  # Status
+    ZON_STATUS: str  # Status (A=Active, I=Inactive)
     ZON_FORMAT: str  # Regex for domain validation
     ZON_CREATE_MIN_YEARS: int
     ZON_CREATE_MAX_YEARS: int
@@ -280,6 +280,8 @@ class Zone:
     ZON_DELETE_CANCEL_DAYS: int
     ZON_RENEW_BEFORE_EXPIRE_DAYS: int
     ZON_MIN_DNS_TO_DELEGATE: int
+    ZON_CREATE_PENDING_DAYS: int = 0  # Days in pending create for restricted zones
+    ZON_CREATE_PENDING_ACTION: str = "A"  # A=Approve, R=Reject after pending days
 
 
 @dataclass
@@ -293,6 +295,81 @@ class Rate:
     RAT_CURRENCY: str  # Currency code
     RAT_START_DATE: date
     RAT_END_DATE: Optional[date] = None
+
+
+# ============================================================================
+# Zone Extension Models (for restricted zones like .co.ae, .gov.ae)
+# ============================================================================
+
+@dataclass
+class Extension:
+    """EXTENSIONS table - Extension definitions (e.g., 'ae-eligibility')"""
+    EXT_ID: int  # Primary Key
+    EXT_NAME: str  # Extension name (e.g., "aeEligibility")
+    EXT_URI: str  # XML namespace URI
+    EXT_SCHEMA: Optional[str] = None  # XSD schema location
+
+
+@dataclass
+class ExtItem:
+    """EXT_ITEMS table - Extension item types"""
+    EXT_ITEM_ID: int  # Primary Key
+    EXT_ID: int  # FK to EXTENSIONS
+    EXT_ITEM_NAME: str  # Item name (e.g., "eligibilityType")
+
+
+@dataclass
+class ExtItemField:
+    """EXT_ITEM_FIELDS table - Fields within extension items"""
+    EXT_ITEM_FIELD_ID: int  # Primary Key
+    EXT_ITEM_ID: int  # FK to EXT_ITEMS
+    FIELD_KEY: str  # Field key (e.g., "eligibilityType", "policyReason")
+    FIELD_LABEL: str  # Display label
+    FIELD_TYPE: str  # Data type (string, integer, date, enum)
+    FIELD_REQUIRED: str  # Y/N - Required field
+    FIELD_MIN_LENGTH: Optional[int] = None
+    FIELD_MAX_LENGTH: Optional[int] = None
+    FIELD_PATTERN: Optional[str] = None  # Regex validation pattern
+
+
+@dataclass
+class ExtFieldValue:
+    """EXT_FIELD_VALUES table - Allowed values for enum fields"""
+    EXT_FIELD_VALUE_ID: int  # Primary Key
+    EXT_ITEM_FIELD_ID: int  # FK to EXT_ITEM_FIELDS
+    VALUE_CODE: str  # Internal code
+    VALUE_LABEL: str  # Display label
+    VALUE_ACTIVE: str = "Y"  # Y/N
+
+
+@dataclass
+class ZoneExtItem:
+    """ZONE_EXT_ITEMS table - Links extensions to zones"""
+    ZON_EXT_ITEM_ID: int  # Primary Key
+    ZON_ID: int  # FK to ZONES
+    EXT_ITEM_ID: int  # FK to EXT_ITEMS
+    REQUIRED: str = "Y"  # Y/N - Required for this zone
+
+
+@dataclass
+class ZoneExtension:
+    """ZONE_EXTENSIONS table - Extensions enabled for a zone"""
+    ZON_EXT_ID: int  # Primary Key
+    ZON_ID: int  # FK to ZONES
+    EXT_ID: int  # FK to EXTENSIONS
+
+
+@dataclass
+class DomainExtFieldData:
+    """DOMAIN_EXT_FIELD_DATA table - Extension data for domains"""
+    DEF_ID: int  # Primary Key
+    DOM_ROID: str  # FK to domain ROID
+    ZON_EXT_ID: int  # FK to ZONE_EXTENSIONS
+    EXT_ITEM_FIELD_ID: int  # FK to EXT_ITEM_FIELDS
+    VALUE: str  # Actual value
+    VALUE_DATE: Optional[date] = None  # For date fields
+    CREATED_DATE: Optional[date] = None
+    UPDATED_DATE: Optional[date] = None
 
 
 # ============================================================================

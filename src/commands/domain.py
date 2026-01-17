@@ -25,6 +25,7 @@ from src.core.session_manager import SessionInfo
 from src.core.xml_processor import EPPCommand
 from src.database.repositories.domain_repo import get_domain_repo
 from src.database.repositories.account_repo import get_account_repo
+from src.database.repositories.extension_repo import get_extension_repo
 from src.utils.roid_generator import generate_roid
 from src.utils.password_utils import generate_auth_info, validate_auth_info
 from src.validators.epp_validator import get_validator
@@ -138,13 +139,49 @@ class DomainInfoHandler(ObjectCommandHandler):
             # Only subordinate hosts
             domain["nameservers"] = []
 
+        # Get extension data for the domain
+        extension_repo = await get_extension_repo()
+        extension_data = await extension_repo.get_domain_extension_data(domain.get("roid"))
+
+        # Format extension data for response
+        extensions_response = None
+        if extension_data:
+            extensions_response = self._format_extension_data(extension_data)
+
         # Build response
         result_data = self.response_builder.build_domain_info_result(domain)
 
         return self.success_response(
             cl_trid=cl_trid,
-            result_data=result_data
+            result_data=result_data,
+            extensions=extensions_response
         )
+
+    def _format_extension_data(
+        self, extension_data: List[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Format extension data for EPP response.
+
+        Args:
+            extension_data: Raw extension data from database
+
+        Returns:
+            Dict of {ext_name: {field_key: value}}
+        """
+        result: Dict[str, Dict[str, str]] = {}
+
+        for row in extension_data:
+            ext_name = row.get("EXT_NAME")
+            field_key = row.get("FIELD_KEY")
+            value = row.get("VALUE")
+
+            if ext_name and field_key:
+                if ext_name not in result:
+                    result[ext_name] = {"_uri": row.get("EXT_URI", "")}
+                result[ext_name][field_key] = value
+
+        return result
 
     async def get_roid_from_command(
         self,
@@ -234,12 +271,31 @@ class DomainCreateHandler(ObjectCommandHandler):
             )
 
         # Check zone status
-        if zone_config.get("ZON_STATUS") != "ACTIVE":
+        zone_status = zone_config.get("ZON_STATUS")
+        if zone_status not in ("ACTIVE", "A"):
             raise CommandError(
                 2306,
                 "Parameter value policy error",
                 reason=f"Zone {zone} is not active"
             )
+
+        # Get zone ID for extension validation
+        zone_id = zone_config.get("ZON_ID")
+
+        # Validate zone extensions (for restricted zones like .co.ae, .gov.ae)
+        extension_repo = await get_extension_repo()
+        extension_data = self._extract_extension_data(command.extensions)
+
+        if zone_id:
+            extension_errors = await extension_repo.validate_extension_data(
+                zone_id, extension_data
+            )
+            if extension_errors:
+                raise CommandError(
+                    2306,
+                    "Parameter value policy error",
+                    reason="; ".join(extension_errors)
+                )
 
         # Get rate for billing
         rate = await domain_repo.get_rate(zone, period, unit)
@@ -291,6 +347,12 @@ class DomainCreateHandler(ObjectCommandHandler):
                 nameservers=nameservers
             )
 
+            # Save extension data if present
+            if extension_data and zone_id:
+                await self._save_extension_data(
+                    extension_repo, roid, zone_id, extension_data
+                )
+
             # Debit account
             await account_repo.debit(session.account_id, rate, f"Domain create: {domain_name}")
 
@@ -315,6 +377,84 @@ class DomainCreateHandler(ObjectCommandHandler):
             cl_trid=cl_trid,
             result_data=result_data
         )
+
+    def _extract_extension_data(
+        self, extensions: Dict[str, Any]
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Extract extension field data from parsed extensions.
+
+        Args:
+            extensions: Parsed extensions dict
+
+        Returns:
+            Dict of {ext_name: {field_key: value}}
+        """
+        result = {}
+
+        # AE Eligibility extension
+        if "aeEligibility" in extensions:
+            ae_ext = extensions["aeEligibility"]
+            if "fields" in ae_ext:
+                result["aeEligibility"] = ae_ext["fields"]
+
+        # AE Domain extension
+        if "aeDomain" in extensions:
+            ae_dom = extensions["aeDomain"]
+            if "fields" in ae_dom:
+                result["aeDomain"] = ae_dom["fields"]
+
+        # Generic extensions - extract data field
+        for ext_name, ext_data in extensions.items():
+            if ext_name not in result and isinstance(ext_data, dict):
+                if "data" in ext_data:
+                    result[ext_name] = ext_data["data"]
+                elif "fields" in ext_data:
+                    result[ext_name] = ext_data["fields"]
+
+        return result
+
+    async def _save_extension_data(
+        self,
+        extension_repo,
+        domain_roid: str,
+        zone_id: int,
+        extension_data: Dict[str, Dict[str, str]]
+    ):
+        """
+        Save extension field data for a domain.
+
+        Args:
+            extension_repo: Extension repository
+            domain_roid: Domain ROID
+            zone_id: Zone ID
+            extension_data: Dict of {ext_name: {field_key: value}}
+        """
+        # Get field info for the zone
+        field_info = await extension_repo.get_extension_field_info(zone_id)
+
+        for ext_name, fields in extension_data.items():
+            if ext_name not in field_info:
+                continue
+
+            ext_info = field_info[ext_name]
+            zon_ext_id = ext_info.get("zon_ext_id")
+
+            if not zon_ext_id:
+                continue
+
+            for field_key, value in fields.items():
+                if field_key in ext_info.get("fields", {}):
+                    field_config = ext_info["fields"][field_key]
+                    field_id = field_config.get("field_id")
+
+                    if field_id and value:
+                        await extension_repo.save_domain_extension_data(
+                            domain_roid=domain_roid,
+                            zon_ext_id=zon_ext_id,
+                            ext_item_field_id=field_id,
+                            value=value
+                        )
 
 
 class DomainUpdateHandler(ObjectCommandHandler):

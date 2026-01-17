@@ -226,7 +226,8 @@ class BaseCommandHandler(ABC):
         cl_trid: Optional[str] = None,
         result_data: Any = None,
         code: int = 1000,
-        message: Optional[str] = None
+        message: Optional[str] = None,
+        extensions: Any = None
     ) -> bytes:
         """
         Build a success response.
@@ -236,15 +237,26 @@ class BaseCommandHandler(ABC):
             result_data: Optional result data element
             code: Response code (default 1000)
             message: Optional custom message
+            extensions: Optional extensions data (dict or XML element)
 
         Returns:
             XML response bytes
         """
+        # Build extension XML if dict provided
+        extensions_xml = None
+        if extensions:
+            if isinstance(extensions, dict):
+                extensions_xml = self.response_builder.build_extensions_response(extensions)
+            else:
+                # Already an XML element
+                extensions_xml = extensions
+
         return self.response_builder.build_response(
             code=code,
             message=message,
             cl_trid=cl_trid,
-            result_data=result_data
+            result_data=result_data,
+            extensions=extensions_xml
         )
 
     def error_response(

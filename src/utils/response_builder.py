@@ -708,6 +708,106 @@ class ResponseBuilder:
         etree.SubElement(cre_data, "{%s}crDate" % HOST_NS).text = cr_date
         return cre_data
 
+    # =========================================================================
+    # Extension Response Builders
+    # =========================================================================
+
+    def build_ae_eligibility_info(
+        self,
+        extension_data: Dict[str, Dict[str, str]]
+    ) -> Optional[etree._Element]:
+        """
+        Build AE eligibility extension info response.
+
+        Args:
+            extension_data: Dict of {ext_name: {field_key: value}}
+
+        Returns:
+            Extension XML element or None
+        """
+        if not extension_data:
+            return None
+
+        # AE Eligibility namespace
+        AE_ELIGIBILITY_NS = "urn:aeda:params:xml:ns:aeEligibility-1.0"
+
+        # Check if we have eligibility data
+        ae_data = extension_data.get("aeEligibility", {})
+        if not ae_data or "_uri" in ae_data and len(ae_data) == 1:
+            return None
+
+        # Get namespace URI from data or use default
+        ns_uri = ae_data.pop("_uri", AE_ELIGIBILITY_NS)
+
+        # Create extension element
+        inf_data = etree.Element(
+            "{%s}infData" % ns_uri,
+            nsmap={"aeEligibility": ns_uri}
+        )
+
+        # Add fields in standard order
+        field_order = [
+            "eligibilityType",
+            "eligibilityName",
+            "eligibilityID",
+            "eligibilityIDType",
+            "registrantID",
+            "registrantIDType",
+            "registrantName",
+            "policyReason"
+        ]
+
+        for field in field_order:
+            value = ae_data.get(field)
+            if value:
+                etree.SubElement(inf_data, "{%s}%s" % (ns_uri, field)).text = value
+
+        # Add any additional fields not in standard order
+        for field, value in ae_data.items():
+            if field not in field_order and value and not field.startswith("_"):
+                etree.SubElement(inf_data, "{%s}%s" % (ns_uri, field)).text = value
+
+        return inf_data
+
+    def build_extensions_response(
+        self,
+        extension_data: Dict[str, Dict[str, str]]
+    ) -> Optional[etree._Element]:
+        """
+        Build all extension responses.
+
+        Args:
+            extension_data: Dict of {ext_name: {field_key: value}}
+
+        Returns:
+            Extension XML element containing all extensions or None
+        """
+        if not extension_data:
+            return None
+
+        # Container for all extensions
+        extensions = []
+
+        # Build AE Eligibility extension
+        ae_eligibility = self.build_ae_eligibility_info(extension_data)
+        if ae_eligibility is not None:
+            extensions.append(ae_eligibility)
+
+        # Build other extensions as needed
+        # Add more extension builders here for other types
+
+        if not extensions:
+            return None
+
+        # If only one extension, return it directly
+        if len(extensions) == 1:
+            return extensions[0]
+
+        # Multiple extensions - wrap in a container
+        # (Note: EPP typically has extensions as separate children)
+        # Return the first one for now, or could create wrapper
+        return extensions[0]
+
 
 # Global response builder instance
 _builder: Optional[ResponseBuilder] = None

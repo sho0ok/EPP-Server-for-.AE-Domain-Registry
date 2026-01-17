@@ -699,15 +699,110 @@ class XMLProcessor:
         extensions = {}
         ext_elem = _find_element(command_elem, "extension", NSMAP)
         if ext_elem is not None:
-            # Generic extension parsing - store raw XML for each extension
             for child in ext_elem:
                 ns = child.tag.split("}")[0].strip("{") if "}" in child.tag else None
                 tag = child.tag.split("}")[-1]
-                extensions[tag] = {
-                    "namespace": ns,
-                    "xml": etree.tostring(child, encoding="unicode")
-                }
+
+                # Parse AE eligibility extension
+                if "aeEligibility" in tag or "eligibility" in tag.lower():
+                    extensions["aeEligibility"] = self._parse_ae_eligibility(child, ns)
+                # Parse AE domain extension (for policy reasons, etc.)
+                elif "aeDomain" in tag or "domain" in tag.lower() and "ae" in (ns or "").lower():
+                    extensions["aeDomain"] = self._parse_ae_domain(child, ns)
+                else:
+                    # Generic extension parsing - store raw XML
+                    extensions[tag] = {
+                        "namespace": ns,
+                        "xml": etree.tostring(child, encoding="unicode"),
+                        "data": self._parse_extension_generic(child)
+                    }
         return extensions
+
+    def _parse_ae_eligibility(self, elem: etree._Element, ns: str) -> Dict[str, Any]:
+        """
+        Parse AE eligibility extension.
+
+        Example:
+        <aeEligibility:create xmlns:aeEligibility="urn:aeda:params:xml:ns:aeEligibility-1.0">
+            <aeEligibility:eligibilityType>TradeLicense</aeEligibility:eligibilityType>
+            <aeEligibility:eligibilityName>Example Company LLC</aeEligibility:eligibilityName>
+            <aeEligibility:eligibilityID>123456</aeEligibility:eligibilityID>
+            <aeEligibility:eligibilityIDType>TradeLicense</aeEligibility:eligibilityIDType>
+            <aeEligibility:policyReason>1</aeEligibility:policyReason>
+        </aeEligibility:create>
+        """
+        data = {"namespace": ns, "fields": {}}
+
+        # Standard AE eligibility fields
+        eligibility_fields = [
+            "eligibilityType",
+            "eligibilityName",
+            "eligibilityID",
+            "eligibilityIDType",
+            "policyReason",
+            "registrantID",
+            "registrantIDType",
+            "registrantName"
+        ]
+
+        for field in eligibility_fields:
+            # Try with namespace prefix
+            field_elem = elem.find(f"{{{ns}}}{field}") if ns else None
+            # Try without namespace
+            if field_elem is None:
+                field_elem = elem.find(f".//{field}")
+            # Try local name match
+            if field_elem is None:
+                for child in elem.iter():
+                    local_name = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                    if local_name == field:
+                        field_elem = child
+                        break
+
+            if field_elem is not None and field_elem.text:
+                data["fields"][field] = field_elem.text.strip()
+
+        return data
+
+    def _parse_ae_domain(self, elem: etree._Element, ns: str) -> Dict[str, Any]:
+        """
+        Parse AE domain extension.
+
+        Example:
+        <aeDomain:create xmlns:aeDomain="urn:aeda:params:xml:ns:aeDomain-1.0">
+            <aeDomain:policyReason>1</aeDomain:policyReason>
+        </aeDomain:create>
+        """
+        data = {"namespace": ns, "fields": {}}
+
+        # Standard AE domain fields
+        domain_fields = [
+            "policyReason",
+            "command"
+        ]
+
+        for field in domain_fields:
+            field_elem = elem.find(f"{{{ns}}}{field}") if ns else None
+            if field_elem is None:
+                for child in elem.iter():
+                    local_name = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                    if local_name == field:
+                        field_elem = child
+                        break
+
+            if field_elem is not None and field_elem.text:
+                data["fields"][field] = field_elem.text.strip()
+
+        return data
+
+    def _parse_extension_generic(self, elem: etree._Element) -> Dict[str, str]:
+        """Parse extension element generically."""
+        data = {}
+        for child in elem.iter():
+            if child.text and child.text.strip():
+                local_name = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                data[local_name] = child.text.strip()
+        return data
 
     def _generic_parse(self, elem: etree._Element) -> Dict[str, Any]:
         """Generic element parser for unhandled commands."""
