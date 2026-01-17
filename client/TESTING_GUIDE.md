@@ -123,7 +123,25 @@ epptest domain update example.ae --registrant NEWREG001
 
 # Add status
 epptest domain update example.ae --add-status clientHold
+
+# Remove status
+epptest domain update example.ae --rem-status clientHold
+
+# Add multiple statuses
+epptest domain update example.ae --add-status clientHold --add-status clientTransferProhibited
 ```
+
+#### Available Client Statuses
+
+Registrars can set these client-side statuses:
+
+| Status | Description |
+|--------|-------------|
+| `clientHold` | Prevents domain from resolving in DNS |
+| `clientTransferProhibited` | Prevents domain transfers |
+| `clientUpdateProhibited` | Prevents domain updates |
+| `clientDeleteProhibited` | Prevents domain deletion |
+| `clientRenewProhibited` | Prevents domain renewal |
 
 ### Renew Domain
 
@@ -476,11 +494,27 @@ try:
     print(f"Status: {info.status}")
     print(f"Registrant: {info.registrant}")
 
-    # 4. Update
-    print("\n=== Update ===")
+    # 4. Update - add nameserver
+    print("\n=== Update (add nameserver) ===")
     response = client.domain_update(
         name="lifecycle-test.ae",
         add_ns=["ns3.example.ae"],
+    )
+    print(f"Update: {response.code} - {response.message}")
+
+    # 4b. Update - add clientHold status
+    print("\n=== Update (add clientHold) ===")
+    response = client.domain_update(
+        name="lifecycle-test.ae",
+        add_status=["clientHold"],
+    )
+    print(f"Update: {response.code} - {response.message}")
+
+    # 4c. Update - remove clientHold status
+    print("\n=== Update (remove clientHold) ===")
+    response = client.domain_update(
+        name="lifecycle-test.ae",
+        rem_status=["clientHold"],
     )
     print(f"Update: {response.code} - {response.message}")
 
