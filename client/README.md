@@ -4,9 +4,10 @@ A production-ready Python EPP (Extensible Provisioning Protocol) client toolkit 
 
 ## Quick Start
 
-### 1. Install
+### 1. Clone & Install
 ```bash
-cd client
+git clone https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry.git
+cd EPP-Server-for-.AE-Domain-Registry/client
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
