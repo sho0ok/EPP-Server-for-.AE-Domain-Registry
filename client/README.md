@@ -2,28 +2,39 @@
 
 A production-ready Python EPP (Extensible Provisioning Protocol) client toolkit for domain registrars. Supports RFC 5730-5734 with TLS 1.2+ security.
 
-## Quick Start (2 Minutes)
+## Quick Start
 
+### 1. Install
 ```bash
-# 1. Install
 cd client
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
-
-# 2. Test with mock server
-python3 tests/mock_server.py &
-
-# 3. Run a command
-epp --host localhost --port 7700 \
-    --cert ~/test-certs/client.crt \
-    --key ~/test-certs/client.key \
-    --ca ~/test-certs/ca.crt \
-    -u testregistrar -P testpass \
-    domain check example.ae
 ```
 
-For real server, replace `localhost:7700` with your registry's EPP server and use your registrar certificates.
+### 2. Generate Certificate
+```bash
+mkdir -p ~/epp-certs && cd ~/epp-certs
+openssl genrsa -out registrar.key 2048
+openssl req -new -key registrar.key -out registrar.csr \
+    -subj "/C=AE/O=Your Company/CN=your-registrar-id"
+```
+
+### 3. Submit CSR to Registry
+- Upload `registrar.csr` to registry portal
+- Download signed `registrar.crt` and `ca.crt`
+
+### 4. Connect
+```bash
+export EPP_PASSWORD='your-password'
+
+epp --host epp.registry.ae --port 700 \
+    --cert ~/epp-certs/registrar.crt \
+    --key ~/epp-certs/registrar.key \
+    --ca ~/epp-certs/ca.crt \
+    -u your-registrar-id \
+    domain check example.ae
+```
 
 ---
 
