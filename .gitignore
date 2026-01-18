@@ -47,6 +47,7 @@ Thumbs.db
 # Secrets (never commit these)
 *.env
 .env.*
+!.env.example
 secrets.yaml
 credentials.yaml
 
