@@ -1,6 +1,41 @@
 # EPP Server Installation Guide
 
-## Package Location
+## Quick Start (5 Minutes)
+
+```bash
+# 1. Clone
+git clone https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry.git
+cd EPP-Server-for-.AE-Domain-Registry
+
+# 2. Setup Python
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Configure
+cp .env.example .env
+nano .env  # Add your Oracle DB credentials
+
+# 4. Generate certificates
+mkdir -p certs && cd certs
+openssl genrsa -out ca.key 2048
+openssl req -new -x509 -days 365 -key ca.key -out ca.crt -subj "/CN=EPP CA"
+openssl genrsa -out server.key 2048
+openssl req -new -key server.key -out server.csr -subj "/CN=localhost"
+openssl x509 -req -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
+cd ..
+
+# 5. Run
+python3 -m src.main
+```
+
+Server listens on port 700. Done!
+
+---
+
+## Detailed Installation (Production)
+
+### Package Location
 
 The self-contained installation package is located at:
 ```
