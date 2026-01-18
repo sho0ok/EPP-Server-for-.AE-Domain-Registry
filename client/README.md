@@ -2,6 +2,31 @@
 
 A production-ready Python EPP (Extensible Provisioning Protocol) client toolkit for domain registrars. Supports RFC 5730-5734 with TLS 1.2+ security.
 
+## Quick Start (2 Minutes)
+
+```bash
+# 1. Install
+cd client
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+
+# 2. Test with mock server
+python3 tests/mock_server.py &
+
+# 3. Run a command
+epp --host localhost --port 7700 \
+    --cert ~/test-certs/client.crt \
+    --key ~/test-certs/client.key \
+    --ca ~/test-certs/ca.crt \
+    -u testregistrar -P testpass \
+    domain check example.ae
+```
+
+For real server, replace `localhost:7700` with your registry's EPP server and use your registrar certificates.
+
+---
+
 ## Features
 
 - **Full EPP Support**: Domain, Contact, and Host object management
