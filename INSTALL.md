@@ -1,35 +1,140 @@
 # EPP Server Installation Guide
 
-## Quick Start (5 Minutes)
+## Quick Start
+
+### Step 1: Install Python 3.9+ (RHEL 7.9)
 
 ```bash
-# 1. Clone
+# Enable Software Collections
+sudo yum install -y centos-release-scl
+
+# Install Python 3.9
+sudo yum install -y rh-python39
+
+# Enable Python 3.9
+scl enable rh-python39 bash
+
+# Verify
+python3 --version  # Should show 3.9.x
+```
+
+### Step 2: Install Oracle Instant Client
+
+```bash
+# Download from Oracle website or use yum if configured
+sudo yum install -y oracle-instantclient19.8-basic
+
+# Set library path
+echo 'export LD_LIBRARY_PATH=/usr/lib/oracle/19.8/client64/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Step 3: Clone & Install
+
+```bash
+# Clone
 git clone https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry.git
 cd EPP-Server-for-.AE-Domain-Registry
 
-# 2. Setup Python
+# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
+
+# Install dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
+```
 
-# 3. Configure
+### Step 4: Configure Database
+
+```bash
+# Copy example config
 cp .env.example .env
-nano .env  # Add your Oracle DB credentials
 
-# 4. Generate certificates
+# Edit with your credentials
+vi .env
+```
+
+Change these values in `.env`:
+```
+DB_HOST=your-oracle-server
+DB_PORT=1521
+DB_SERVICE=your-service-name
+DB_USER=your-username
+DB_PASSWORD=your-password
+```
+
+### Step 5: Generate Certificates
+
+```bash
 mkdir -p certs && cd certs
+
+# Generate CA
 openssl genrsa -out ca.key 2048
 openssl req -new -x509 -days 365 -key ca.key -out ca.crt -subj "/CN=EPP CA"
+
+# Generate Server cert
 openssl genrsa -out server.key 2048
 openssl req -new -key server.key -out server.csr -subj "/CN=localhost"
 openssl x509 -req -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
-cd ..
 
-# 5. Run
+# Generate Client cert (for testing)
+openssl genrsa -out client.key 2048
+openssl req -new -key client.key -out client.csr -subj "/CN=testclient"
+openssl x509 -req -days 365 -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out client.crt
+
+cd ..
+```
+
+### Step 6: Run
+
+```bash
+source venv/bin/activate
 python3 -m src.main
 ```
 
-Server listens on port 700. Done!
+Server listens on port 700.
+
+### Step 7: Test Connection
+
+```bash
+openssl s_client -connect localhost:700 \
+    -cert certs/client.crt \
+    -key certs/client.key \
+    -CAfile certs/ca.crt
+```
+
+---
+
+## Troubleshooting
+
+### "Python 3.9 not found"
+```bash
+scl enable rh-python39 bash
+```
+
+### "No module named oracledb"
+```bash
+source venv/bin/activate
+pip install oracledb
+```
+
+### "Cannot locate Oracle Client library"
+```bash
+export LD_LIBRARY_PATH=/usr/lib/oracle/19.8/client64/lib:$LD_LIBRARY_PATH
+```
+
+### "Connection refused on port 700"
+```bash
+# Check if running
+ps aux | grep python
+
+# Check firewall
+sudo firewall-cmd --add-port=700/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+---
 
 ---
 
