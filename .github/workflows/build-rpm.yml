@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:  # Allow manual trigger
 
+permissions:
+  contents: write  # Required for creating releases
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -55,14 +58,27 @@ jobs:
           name: epp-server-rpm
           path: build/rpmbuild/RPMS/**/*.rpm
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        if: github.ref == 'refs/heads/main'
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download RPM artifact
+        uses: actions/download-artifact@v4
         with:
-          tag_name: v1.0.0-${{ github.run_number }}
+          name: epp-server-rpm
+          path: ./rpm
+
+      - name: List files
+        run: find ./rpm -type f
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-build${{ github.run_number }}
           name: EPP Server v1.0.0 (Build ${{ github.run_number }})
-          files: build/rpmbuild/RPMS/**/*.rpm
+          files: ./rpm/**/*.rpm
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
