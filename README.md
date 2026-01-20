@@ -54,7 +54,17 @@ Set password:
 ```bash
 vi /etc/systemd/system/epp-server.service.d/oracle.conf
 ```
-Change `CHANGE_ME` to your Oracle password, then:
+The file looks like this:
+```
+[Service]
+Environment="EPP_ORACLE_PASSWORD=CHANGE_ME"
+```
+Replace `CHANGE_ME` with your actual Oracle password:
+```
+[Service]
+Environment="EPP_ORACLE_PASSWORD=MySecurePass123"
+```
+Save and reload:
 ```bash
 systemctl daemon-reload
 ```
