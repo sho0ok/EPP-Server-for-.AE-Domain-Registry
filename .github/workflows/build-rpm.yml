@@ -36,6 +36,7 @@ jobs:
           cp build/rpm/SCRIPTS/generate-certs.sh build/rpmbuild/SOURCES/scripts/
           cp build/rpm/SCRIPTS/epp-server-cli build/rpmbuild/SOURCES/scripts/
           cp build/rpm/SOURCES/systemd/epp-server.service build/rpmbuild/SOURCES/systemd/
+          cp build/rpm/SOURCES/systemd/oracle.conf build/rpmbuild/SOURCES/systemd/
 
       - name: Create virtual environment with dependencies
         run: |

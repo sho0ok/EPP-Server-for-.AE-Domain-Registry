@@ -52,11 +52,10 @@ oracle:
 
 Set password:
 ```bash
-cat > /etc/systemd/system/epp-server.service.d/oracle.conf << EOF
-[Service]
-Environment="EPP_ORACLE_PASSWORD=your_password"
-EOF
-chmod 600 /etc/systemd/system/epp-server.service.d/oracle.conf
+vi /etc/systemd/system/epp-server.service.d/oracle.conf
+```
+Change `CHANGE_ME` to your Oracle password, then:
+```bash
 systemctl daemon-reload
 ```
 

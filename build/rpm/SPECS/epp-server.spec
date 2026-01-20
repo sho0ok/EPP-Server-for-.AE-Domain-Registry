@@ -39,6 +39,7 @@ cp %{_sourcedir}/scripts/epp-server-cli %{buildroot}/usr/bin/epp-server
 
 # Copy systemd service
 cp %{_sourcedir}/systemd/epp-server.service %{buildroot}/usr/lib/systemd/system/
+cp %{_sourcedir}/systemd/oracle.conf %{buildroot}/etc/systemd/system/epp-server.service.d/
 
 %files
 %dir /opt/epp-server
@@ -48,6 +49,7 @@ cp %{_sourcedir}/systemd/epp-server.service %{buildroot}/usr/lib/systemd/system/
 %config(noreplace) /etc/epp-server/logging.yaml
 %dir /etc/epp-server/tls
 %dir /etc/systemd/system/epp-server.service.d
+%config(noreplace) %attr(600,root,root) /etc/systemd/system/epp-server.service.d/oracle.conf
 %dir /var/log/epp-server
 %attr(755,root,root) /usr/bin/epp-server
 %attr(755,root,root) /usr/bin/epp-server-generate-certs
