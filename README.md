@@ -7,41 +7,66 @@ A production-ready EPP (Extensible Provisioning Protocol) server for .AE domain 
 - RHEL 9+ (Rocky Linux 9, AlmaLinux 9)
 - Oracle Instant Client
 - Oracle Database with registry schema
+- Python 3.9 (included in RHEL 9)
 
 ## Installation
 
-### 1. Install Oracle Instant Client
+### Step 1: Build the RPM (on a machine with internet)
 
 ```bash
-dnf install oracle-instantclient-release-el9
-dnf install oracle-instantclient-basic
+git clone https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry.git
+cd EPP-Server-for-.AE-Domain-Registry/build
+./build-rpm.sh
 ```
 
-### 2. Install EPP Server
+This creates the RPM file at:
+```
+EPP-Server-for-.AE-Domain-Registry/dist/epp-server-1.0.0-1.el9.x86_64.rpm
+```
 
-Download from [Releases](https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry/releases):
+### Step 2: Copy RPM to target server
 
 ```bash
-dnf install ./epp-server-1.0.0-1.el9.x86_64.rpm
+scp dist/epp-server-1.0.0-1.el9.x86_64.rpm user@your-server:/tmp/
 ```
 
-### 3. Generate Certificates
+### Step 3: Install on target server (no internet required)
+
+```bash
+# SSH to your server
+ssh user@your-server
+
+# Install Oracle Instant Client (if not already installed)
+yum install oracle-instantclient-basic
+
+# Install EPP Server
+yum install /tmp/epp-server-1.0.0-1.el9.x86_64.rpm
+```
+
+### Step 4: Generate TLS Certificates
 
 ```bash
 epp-server-generate-certs
 ```
 
-### 4. Configure Database
+This creates certificates in `/etc/epp-server/tls/`.
+
+### Step 5: Configure Database
 
 Edit `/etc/epp-server/epp.yaml`:
 
+```bash
+vi /etc/epp-server/epp.yaml
+```
+
+Update the oracle section:
 ```yaml
 oracle:
   user: your_db_user
   dsn: "your-oracle-host:1521/YOUR_SERVICE"
 ```
 
-Set password:
+Set database password:
 
 ```bash
 mkdir -p /etc/systemd/system/epp-server.service.d
@@ -53,14 +78,14 @@ chmod 600 /etc/systemd/system/epp-server.service.d/oracle.conf
 systemctl daemon-reload
 ```
 
-### 5. Start Server
+### Step 6: Start Server
 
 ```bash
 systemctl start epp-server
 systemctl enable epp-server
 ```
 
-### 6. Verify
+### Step 7: Verify
 
 ```bash
 systemctl status epp-server
@@ -81,6 +106,7 @@ openssl s_client -connect localhost:700
 systemctl start epp-server      # Start
 systemctl stop epp-server       # Stop
 systemctl restart epp-server    # Restart
+systemctl status epp-server     # Status
 journalctl -u epp-server -f     # View logs
 ```
 
@@ -97,9 +123,7 @@ For registrar client toolkit: [EPP Client Toolkit](https://github.com/sho0ok/EPP
 
 ## Documentation
 
-See [docs/](docs/) for detailed documentation:
-- [Development Setup](docs/GETTING_STARTED.md)
-- [Detailed Installation Options](docs/INSTALL.md)
+See [docs/](docs/) for detailed documentation.
 
 ## License
 
