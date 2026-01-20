@@ -21,7 +21,7 @@ mkdir -p %{buildroot}/opt/epp-server/venv
 mkdir -p %{buildroot}/etc/epp-server
 mkdir -p %{buildroot}/etc/epp-server/tls
 mkdir -p %{buildroot}/etc/systemd/system/epp-server.service.d
-mkdir -p %{buildroot}/var/log/epp-server
+mkdir -p %{buildroot}/var/log/registryd
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/lib/systemd/system
 
@@ -50,7 +50,7 @@ cp %{_sourcedir}/systemd/oracle.conf %{buildroot}/etc/systemd/system/epp-server.
 %dir /etc/epp-server/tls
 %dir /etc/systemd/system/epp-server.service.d
 %config(noreplace) %attr(600,root,root) /etc/systemd/system/epp-server.service.d/oracle.conf
-%dir /var/log/epp-server
+%dir /var/log/registryd
 %attr(755,root,root) /usr/bin/epp-server
 %attr(755,root,root) /usr/bin/epp-server-generate-certs
 /usr/lib/systemd/system/epp-server.service
@@ -64,7 +64,7 @@ getent passwd epp >/dev/null || useradd -r -g epp -d /opt/epp-server -s /sbin/no
 # Fix permissions
 chown -R epp:epp /opt/epp-server
 chown -R epp:epp /etc/epp-server
-chown -R epp:epp /var/log/epp-server
+chown -R epp:epp /var/log/registryd
 chmod 600 /etc/epp-server/epp.yaml
 
 # Reload systemd
