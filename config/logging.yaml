@@ -11,6 +11,9 @@ formatters:
   transaction:
     format: "%(asctime)s|%(message)s"
     datefmt: "%Y-%m-%d %H:%M:%S"
+  rawxml:
+    format: "%(asctime)s\n%(message)s\n---"
+    datefmt: "%Y-%m-%d %H:%M:%S"
 
 handlers:
   console:
@@ -24,8 +27,9 @@ handlers:
     level: DEBUG
     formatter: detailed
     filename: /var/log/registryd/eppd.log
-    when: midnight
-    backupCount: 30
+    when: M
+    interval: 1
+    backupCount: 0
     encoding: utf8
 
   txlog:
@@ -33,8 +37,19 @@ handlers:
     level: INFO
     formatter: transaction
     filename: /var/log/registryd/eppd.txlog
-    when: midnight
-    backupCount: 30
+    when: M
+    interval: 1
+    backupCount: 0
+    encoding: utf8
+
+  xmllog:
+    class: logging.handlers.TimedRotatingFileHandler
+    level: DEBUG
+    formatter: rawxml
+    filename: /var/log/registryd/eppd.xmllog
+    when: M
+    interval: 1
+    backupCount: 0
     encoding: utf8
 
 loggers:
@@ -46,6 +61,11 @@ loggers:
   epp.transaction:
     level: INFO
     handlers: [txlog]
+    propagate: false
+
+  epp.xmllog:
+    level: DEBUG
+    handlers: [xmllog]
     propagate: false
 
   epp.server:

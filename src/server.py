@@ -36,6 +36,8 @@ from src.utils.response_builder import (
 )
 
 logger = logging.getLogger("epp.server")
+tx_logger = logging.getLogger("epp.transaction")
+xml_logger = logging.getLogger("epp.xmllog")
 
 
 class EPPClientHandler:
@@ -135,12 +137,24 @@ class EPPClientHandler:
                     # Read next frame
                     xml_data = await self.frame_handler.read_frame(self.reader)
 
+                    # Log raw XML request
+                    xml_logger.debug(f"REQUEST from {self.client_ip}:\n{xml_data.decode('utf-8', errors='replace')}")
+
                     # Parse command
                     command = self.xml_processor.parse(xml_data)
                     logger.debug(f"Received command: {command.command_type}")
 
                     # Process command
                     response = await self._process_command(command)
+
+                    # Log raw XML response
+                    xml_logger.debug(f"RESPONSE to {self.client_ip}:\n{response.decode('utf-8', errors='replace')}")
+
+                    # Log transaction summary
+                    client_id = self.client_id or "anonymous"
+                    obj_type = command.object_type or ""
+                    cmd_type = command.command_type or ""
+                    tx_logger.info(f"{client_id}|{obj_type}:{cmd_type}|{self.client_ip}")
 
                     # Send response
                     await self.frame_handler.write_frame(self.writer, response)
@@ -472,12 +486,13 @@ class EPPServer:
 
     def setup_logging(self) -> None:
         """Configure logging from YAML file."""
-        logging_config = Path("config/logging.yaml")
+        logging_config_path = os.environ.get("EPP_LOG_CONFIG", "config/logging.yaml")
+        logging_config = Path(logging_config_path)
         if logging_config.exists():
             with open(logging_config, "r") as f:
                 log_config = yaml.safe_load(f)
                 # Ensure log directory exists
-                log_dir = Path("/var/log/epp-server")
+                log_dir = Path("/var/log/registryd")
                 if not log_dir.exists():
                     try:
                         log_dir.mkdir(parents=True, exist_ok=True)
@@ -486,7 +501,7 @@ class EPPServer:
                         for handler in log_config.get("handlers", {}).values():
                             if "filename" in handler:
                                 handler["filename"] = handler["filename"].replace(
-                                    "/var/log/epp-server/",
+                                    "/var/log/registryd/",
                                     "./logs/"
                                 )
                         Path("./logs").mkdir(exist_ok=True)
