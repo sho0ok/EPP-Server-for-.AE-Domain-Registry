@@ -11,35 +11,20 @@ A production-ready EPP (Extensible Provisioning Protocol) server for .AE domain 
 
 ## Installation
 
-### Step 1: Build the RPM (on a machine with internet)
+### Step 1: Download RPM
+
+Download the latest RPM from [Releases](https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry/releases).
+
+### Step 2: Copy to server
 
 ```bash
-git clone https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry.git
-cd EPP-Server-for-.AE-Domain-Registry/build
-./build-rpm.sh
+scp epp-server-1.0.0-1.el9.x86_64.rpm user@your-server:/tmp/
 ```
 
-This creates the RPM file at:
-```
-EPP-Server-for-.AE-Domain-Registry/dist/epp-server-1.0.0-1.el9.x86_64.rpm
-```
-
-### Step 2: Copy RPM to target server
+### Step 3: Install (no internet required)
 
 ```bash
-scp dist/epp-server-1.0.0-1.el9.x86_64.rpm user@your-server:/tmp/
-```
-
-### Step 3: Install on target server (no internet required)
-
-```bash
-# SSH to your server
 ssh user@your-server
-
-# Install Oracle Instant Client (if not already installed)
-yum install oracle-instantclient-basic
-
-# Install EPP Server
 yum install /tmp/epp-server-1.0.0-1.el9.x86_64.rpm
 ```
 
@@ -49,25 +34,20 @@ yum install /tmp/epp-server-1.0.0-1.el9.x86_64.rpm
 epp-server-generate-certs
 ```
 
-This creates certificates in `/etc/epp-server/tls/`.
-
 ### Step 5: Configure Database
-
-Edit `/etc/epp-server/epp.yaml`:
 
 ```bash
 vi /etc/epp-server/epp.yaml
 ```
 
-Update the oracle section:
+Update:
 ```yaml
 oracle:
   user: your_db_user
   dsn: "your-oracle-host:1521/YOUR_SERVICE"
 ```
 
-Set database password:
-
+Set password:
 ```bash
 mkdir -p /etc/systemd/system/epp-server.service.d
 cat > /etc/systemd/system/epp-server.service.d/oracle.conf << EOF
