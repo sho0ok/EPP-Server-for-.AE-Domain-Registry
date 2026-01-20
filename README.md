@@ -31,7 +31,14 @@ yum install /tmp/epp-server-1.0.0-1.el9.x86_64.rpm
 ### Step 4: Generate TLS Certificates
 
 ```bash
-epp-server-generate-certs
+cd /etc/epp-server/tls
+openssl genrsa -out ca.key 2048
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt -subj "/CN=EPP CA"
+openssl genrsa -out server.key 2048
+openssl req -new -key server.key -out server.csr -subj "/CN=epp.aeda.ae"
+openssl x509 -req -days 3650 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
+rm server.csr
+chmod 600 *.key
 ```
 
 ### Step 5: Configure Database
