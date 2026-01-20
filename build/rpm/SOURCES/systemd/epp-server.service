@@ -1,0 +1,28 @@
+[Unit]
+Description=EPP Server for .AE Domain Registry
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=epp
+Group=epp
+WorkingDirectory=/opt/epp-server
+Environment="PATH=/opt/epp-server/venv/bin:/usr/bin"
+Environment="EPP_CONFIG=/etc/epp-server/epp.yaml"
+Environment="EPP_LOG_CONFIG=/etc/epp-server/logging.yaml"
+ExecStart=/opt/epp-server/venv/bin/python -m src.main
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/epp-server
+ReadWritePaths=/etc/epp-server/tls
+
+[Install]
+WantedBy=multi-user.target

@@ -1,423 +1,106 @@
-# EPP Server & Client for .AE Domain Registry
+# EPP Server for .AE Domain Registry
 
-A complete EPP (Extensible Provisioning Protocol) server and client implementation for the .AE domain registry, compliant with RFC 5730-5734.
+A production-ready EPP (Extensible Provisioning Protocol) server for .AE domain registry. Implements RFC 5730-5734 with TLS 1.2+ and Oracle database backend.
 
-This repository contains:
-- **Server** (`/src`) - EPP server with Oracle backend
-- **Client** (`/client`) - Python client toolkit for registrars
+## Requirements
 
-## EPP Client Toolkit (for Registrars)
+- RHEL 9+ (Rocky Linux 9, AlmaLinux 9)
+- Oracle Instant Client
+- Oracle Database with registry schema
 
-The `client/` directory contains a production-ready Python EPP client toolkit. See [client/README.md](client/README.md) for full documentation.
+## Installation
 
-### Quick Install
-
-```bash
-cd client
-pip install .
-```
-
-### Quick Usage
-
-```python
-from epp_client import EPPClient
-
-with EPPClient(
-    host="epp.registry.ae",
-    port=700,
-    cert_file="client.crt",
-    key_file="client.key",
-    ca_file="ca.crt",
-) as client:
-    client.login("registrar_id", "password")
-
-    # Check domain availability
-    result = client.domain_check(["example.ae", "test.ae"])
-    for item in result.results:
-        print(f"{item.name}: {'available' if item.available else 'taken'}")
-
-    client.logout()
-```
-
-### CLI Tool
+### 1. Install Oracle Instant Client
 
 ```bash
-epp --host epp.registry.ae --cert client.crt --key client.key \
-    -u registrar_id domain check example.ae test.ae
-```
-
----
-
-## EPP Server (for Registry)
-
-### Features
-
-- **Full RFC Compliance**: Implements RFC 5730 (EPP), RFC 5731 (Domain), RFC 5732 (Host), RFC 5733 (Contact), RFC 5734 (TCP Transport)
-- **Secure by Design**: TLS 1.2+ with client certificate authentication
-- **Oracle Backend**: Direct integration with ARI Oracle schema
-- **Complete Operations**: Domain/Contact/Host CRUD, transfers, renewals
-- **Transaction Logging**: All operations logged to CONNECTIONS, SESSIONS, TRANSACTIONS tables
-- **Self-Contained RPM**: All Python dependencies bundled - no internet needed for deployment
-
-## System Requirements
-
-### Target Server
-- RedHat/Rocky/Alma Linux 9+
-- Oracle Instant Client 21+
-- Python 3.9+ (included in RHEL 9)
-- OpenSSL 1.1.1+
-
-### Build Machine
-- Python 3.9+
-- pip and venv modules
-- Development libraries: libxml2-devel, libxslt-devel, openssl-devel, gcc
-- rpm-build package (only if building RPM instead of tarball)
-
-## Quick Start
-
-### Building the Package
-
-**Option 1: Build Tarball (Recommended)**
-
-```bash
-# Install build dependencies (RHEL/Rocky/Alma)
-dnf install python3 python3-pip python3-devel \
-    gcc libxml2-devel libxslt-devel openssl-devel
-
-# Build the self-contained tarball
-cd /path/to/epp-server
-./packaging/build_tarball.sh
-
-# Tarball created at: dist/epp-server-1.0.0.tar.gz
-```
-
-**Option 2: Build RPM (requires rpmbuild)**
-
-```bash
-# Additional dependency for RPM
-dnf install rpm-build
-
-# Build the RPM
-./packaging/build_rpm.sh
-
-# RPM created at: packaging/epp-server-1.0.0-1.el9.x86_64.rpm
-```
-
-### Installation
-
-**From Tarball:**
-
-```bash
-# Copy to server
-scp dist/epp-server-1.0.0.tar.gz user@server:/tmp/
-
-# On server (as root):
-cd /tmp
-tar -xzf epp-server-1.0.0.tar.gz
-cd epp-server-1.0.0
-./install.sh
-```
-
-**From RPM:**
-
-```bash
-# Install Oracle Instant Client (if not already installed)
+dnf install oracle-instantclient-release-el9
 dnf install oracle-instantclient-basic
+```
 
-# Install EPP Server
+### 2. Install EPP Server
+
+Download from [Releases](https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry/releases):
+
+```bash
 dnf install ./epp-server-1.0.0-1.el9.x86_64.rpm
 ```
 
-### Configuration
+### 3. Generate Certificates
 
-#### 1. Configure Oracle Connection
+```bash
+epp-server-generate-certs
+```
 
-Edit `/opt/epp-server/config/epp.yaml`:
+### 4. Configure Database
+
+Edit `/etc/epp-server/epp.yaml`:
 
 ```yaml
 oracle:
-  user: epp_user
-  dsn: "oracle-host:1521/AEREGSVC"
-  pool_min: 5
-  pool_max: 20
+  user: your_db_user
+  dsn: "your-oracle-host:1521/YOUR_SERVICE"
 ```
 
-Set Oracle password (choose one method):
+Set password:
 
 ```bash
-# Method 1: Environment variable
-export ORACLE_PASSWORD='your_secure_password'
-
-# Method 2: Systemd override
 mkdir -p /etc/systemd/system/epp-server.service.d
 cat > /etc/systemd/system/epp-server.service.d/oracle.conf << EOF
 [Service]
-Environment="ORACLE_PASSWORD=your_secure_password"
+Environment="EPP_ORACLE_PASSWORD=your_password"
 EOF
+chmod 600 /etc/systemd/system/epp-server.service.d/oracle.conf
 systemctl daemon-reload
 ```
 
-#### 2. Generate TLS Certificates
+### 5. Start Server
 
 ```bash
-# Generate self-signed certificates (for testing)
-/opt/epp-server/scripts/generate_certs.sh
-
-# For production, use certificates from your organization's CA
-# and place them in /opt/epp-server/config/tls/
-```
-
-#### 3. Start the Service
-
-```bash
-# Enable and start
-systemctl enable epp-server
 systemctl start epp-server
-
-# Check status
-systemctl status epp-server
-
-# View logs
-journalctl -u epp-server -f
+systemctl enable epp-server
 ```
 
-## Directory Structure
+### 6. Verify
 
-```
-/opt/epp-server/
-├── venv/                    # Bundled Python virtual environment
-│   └── lib/python3.x/site-packages/
-│       ├── oracledb/        # Oracle database driver
-│       ├── lxml/            # XML processing
-│       ├── yaml/            # Configuration parsing
-│       ├── cryptography/    # TLS and security
-│       └── dateutil/        # Date calculations
-├── src/
-│   ├── server.py            # Main server entry point
-│   ├── commands/            # EPP command handlers
-│   │   ├── domain.py        # domain:check/info/create/update/delete/renew/transfer
-│   │   ├── contact.py       # contact:check/info/create/update/delete
-│   │   ├── host.py          # host:check/info/create/update/delete
-│   │   └── session.py       # login/logout/hello/poll
-│   ├── core/
-│   │   ├── tls_handler.py   # TLS connection handling
-│   │   ├── frame_handler.py # EPP framing (4-byte length prefix)
-│   │   ├── xml_processor.py # XML parsing
-│   │   └── session_manager.py
-│   ├── database/
-│   │   ├── connection.py    # Oracle connection pool
-│   │   ├── models.py        # Data models
-│   │   └── repositories/    # Database operations
-│   ├── utils/
-│   │   ├── response_builder.py
-│   │   ├── roid_generator.py
-│   │   └── password_utils.py
-│   └── validators/
-│       └── epp_validator.py
-├── config/
-│   ├── epp.yaml             # Server configuration
-│   ├── logging.yaml         # Logging configuration
-│   └── tls/                 # TLS certificates
-├── logs/                    # Log files
-└── scripts/
-    └── generate_certs.sh    # Certificate generator
-```
-
-## Configuration Reference
-
-### epp.yaml
-
-```yaml
-server:
-  host: 0.0.0.0              # Listen address
-  port: 700                  # EPP standard port
-  max_connections: 100       # Maximum concurrent connections
-  connection_timeout: 300    # Connection timeout (seconds)
-  read_timeout: 60           # Read timeout (seconds)
-  server_name: "epp.aeda.ae" # Server hostname
-
-tls:
-  cert_file: /opt/epp-server/config/tls/server.crt
-  key_file: /opt/epp-server/config/tls/server.key
-  ca_file: /opt/epp-server/config/tls/ca-bundle.crt
-  min_version: TLSv1.2       # Minimum TLS version
-  verify_client: true        # Require client certificate
-
-oracle:
-  user: epp_user             # Database username
-  dsn: "host:1521/service"   # Oracle connection string
-  pool_min: 5                # Minimum pool connections
-  pool_max: 20               # Maximum pool connections
-  pool_increment: 2          # Pool growth increment
-
-epp:
-  server_id: "TDRA .AE EPP Server"
-  roid_suffix: "AE"          # ROID suffix (e.g., 12345-AE)
-  supported_versions:
-    - "1.0"
-  supported_languages:
-    - "en"
-  supported_objects:
-    - "urn:ietf:params:xml:ns:domain-1.0"
-    - "urn:ietf:params:xml:ns:contact-1.0"
-    - "urn:ietf:params:xml:ns:host-1.0"
-```
-
-## EPP Commands Supported
-
-### Session Commands
-- `hello` - Server greeting
-- `login` - Authenticate session
-- `logout` - End session
-- `poll` - Retrieve/acknowledge messages
-
-### Domain Commands
-- `domain:check` - Check availability
-- `domain:info` - Get domain details
-- `domain:create` - Register domain
-- `domain:update` - Modify domain
-- `domain:delete` - Delete domain
-- `domain:renew` - Extend registration
-- `domain:transfer` - Transfer domain (request/approve/reject/cancel/query)
-
-### Contact Commands
-- `contact:check` - Check availability
-- `contact:info` - Get contact details
-- `contact:create` - Create contact
-- `contact:update` - Modify contact
-- `contact:delete` - Delete contact
-
-### Host Commands
-- `host:check` - Check availability
-- `host:info` - Get host details
-- `host:create` - Create nameserver
-- `host:update` - Modify nameserver
-- `host:delete` - Delete nameserver
-
-## Security
-
-### TLS Configuration
-- Minimum TLS 1.2 (TLS 1.3 supported)
-- Client certificate required for authentication
-- Certificate CN used as registrar identifier
-
-### Authentication Flow
-1. Client connects with TLS certificate
-2. Server extracts CN from certificate
-3. Client sends EPP login with username/password
-4. Server validates credentials against USERS table
-5. Server verifies client IP against ACCOUNT_EPP_ADDRESSES whitelist
-
-### Database Security
-- All queries use parameterized statements (SQL injection safe)
-- Passwords verified with timing-safe comparison
-- Auth info can be hashed for storage
-
-## Monitoring
-
-### Logs
-```bash
-# Real-time logs
-journalctl -u epp-server -f
-
-# Application logs
-tail -f /opt/epp-server/logs/epp.log
-```
-
-### Service Status
 ```bash
 systemctl status epp-server
+openssl s_client -connect localhost:700
 ```
 
-### Database Monitoring
-```sql
--- Active connections
-SELECT * FROM CONNECTIONS WHERE CNN_END_TIME IS NULL;
+## Configuration Files
 
--- Recent transactions
-SELECT * FROM TRANSACTIONS ORDER BY TRN_ID DESC FETCH FIRST 100 ROWS ONLY;
+| File | Description |
+|------|-------------|
+| `/etc/epp-server/epp.yaml` | Main configuration |
+| `/etc/epp-server/logging.yaml` | Logging settings |
+| `/etc/epp-server/tls/` | TLS certificates |
 
--- Session statistics
-SELECT * FROM SESSIONS WHERE SES_END_TIME IS NULL;
-```
-
-## Troubleshooting
-
-### Service Won't Start
+## Commands
 
 ```bash
-# Check logs
-journalctl -u epp-server -n 50
-
-# Verify Oracle connection
-export ORACLE_PASSWORD='password'
-/opt/epp-server/venv/bin/python -c "
-import oracledb
-conn = oracledb.connect(user='epp_user', password='$ORACLE_PASSWORD', dsn='host:1521/service')
-print('Connected successfully')
-conn.close()
-"
+systemctl start epp-server      # Start
+systemctl stop epp-server       # Stop
+systemctl restart epp-server    # Restart
+journalctl -u epp-server -f     # View logs
 ```
 
-### TLS Certificate Issues
+## Firewall
 
 ```bash
-# Verify certificate
-openssl x509 -in /opt/epp-server/config/tls/server.crt -text -noout
-
-# Test TLS connection
-openssl s_client -connect localhost:700 \
-    -cert client.crt -key client.key -CAfile ca.crt
+firewall-cmd --permanent --add-port=700/tcp
+firewall-cmd --reload
 ```
 
-### Permission Issues
+## EPP Client
 
-```bash
-# Fix ownership
-chown -R epp:epp /opt/epp-server/logs
-chown -R epp:epp /opt/epp-server/run
-chmod 750 /opt/epp-server/config/tls
-chmod 600 /opt/epp-server/config/tls/*.key
-```
+For registrar client toolkit: [EPP Client Toolkit](https://github.com/sho0ok/EPP-Client-Toolkit-for-.AE-Domain-Registry)
 
-## Development
+## Documentation
 
-### Running Locally
-
-```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Set Oracle password
-export ORACLE_PASSWORD='your_password'
-
-# Run server
-python -m src.server --config config/epp.yaml
-```
-
-### Running Tests
-
-```bash
-# Run local tests (no database required)
-python tests/test_local.py
-
-# Tests verify:
-# - Module imports
-# - Frame handler (EPP framing)
-# - XML processor (command parsing)
-# - Response builder (XML generation)
-# - Validators (domain, contact, email, phone, IP)
-# - Password utilities
-# - Database models
-# - TLS configuration
-```
+See [docs/](docs/) for detailed documentation:
+- [Development Setup](docs/GETTING_STARTED.md)
+- [Detailed Installation Options](docs/INSTALL.md)
 
 ## License
 
-Proprietary - AEDA/TDRA
-
-## Support
-
-For support, contact the EPP Server Team at epp@aeda.ae
+MIT License

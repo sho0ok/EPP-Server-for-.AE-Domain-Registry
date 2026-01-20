@@ -7,14 +7,15 @@ server:
   server_name: "epp.aeda.ae"
 
 tls:
-  cert_file: /opt/epp-server/config/tls/server.crt
-  key_file: /opt/epp-server/config/tls/server.key
-  ca_file: /opt/epp-server/config/tls/ca-bundle.crt
+  cert_file: /etc/epp-server/tls/server.crt
+  key_file: /etc/epp-server/tls/server.key
+  ca_file: /etc/epp-server/tls/ca.crt
   min_version: TLSv1.2
   verify_client: true
 
 oracle:
   user: epp_user
+  password: ""  # Set via EPP_ORACLE_PASSWORD environment variable
   dsn: "oracle-host:1521/AEREGSVC"
   pool_min: 5
   pool_max: 20

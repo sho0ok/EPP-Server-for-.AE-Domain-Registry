@@ -1,0 +1,10 @@
+#!/bin/bash
+#
+# EPP Server CLI wrapper
+#
+
+export EPP_CONFIG="/etc/epp-server/epp.yaml"
+export EPP_LOG_CONFIG="/etc/epp-server/logging.yaml"
+
+cd /opt/epp-server
+exec /opt/epp-server/venv/bin/python -m src.main "$@"

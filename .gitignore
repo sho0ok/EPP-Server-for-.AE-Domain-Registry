@@ -9,11 +9,10 @@ ENV/
 env/
 .venv/
 
-# Build directories
-build/
-dist/
-*.egg-info/
-*.egg
+# Build output
+build/rpmbuild/
+*.rpm
+*.tar.gz
 
 # IDE
 .idea/
@@ -31,23 +30,17 @@ run/
 *.pid
 
 # TLS certificates (sensitive)
-config/tls/*.key
-config/tls/*.crt
-config/tls/*.pem
-config/tls/*.csr
-
-# RPM build
-*.rpm
-~/rpmbuild/
+*.key
+*.crt
+*.pem
+*.csr
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Secrets (never commit these)
+# Secrets
 *.env
-.env.*
-!.env.example
 secrets.yaml
 credentials.yaml
 
