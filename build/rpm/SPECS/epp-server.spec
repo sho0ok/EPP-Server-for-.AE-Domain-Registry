@@ -7,7 +7,6 @@ URL:            https://github.com/sho0ok/EPP-Server-for-.AE-Domain-Registry
 BuildArch:      x86_64
 
 Requires:       python3 >= 3.9
-Requires:       python3-pip
 Requires:       openssl
 
 %description
