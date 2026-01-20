@@ -43,20 +43,15 @@ chmod 600 *.key
 
 ### Step 5: Configure Database
 
-```bash
-vi /etc/epp-server/epp.yaml
-```
-
-Update:
+Edit `/etc/epp-server/epp.yaml`:
 ```yaml
 oracle:
-  user: your_db_user
-  dsn: "your-oracle-host:1521/YOUR_SERVICE"
+  user: your_db_user                          # Oracle username
+  dsn: "192.168.1.100:1521/AEREGSVC"          # host:port/service_name
 ```
 
 Set password:
 ```bash
-mkdir -p /etc/systemd/system/epp-server.service.d
 cat > /etc/systemd/system/epp-server.service.d/oracle.conf << EOF
 [Service]
 Environment="EPP_ORACLE_PASSWORD=your_password"

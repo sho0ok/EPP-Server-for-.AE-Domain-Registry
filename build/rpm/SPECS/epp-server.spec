@@ -20,6 +20,7 @@ mkdir -p %{buildroot}/opt/epp-server
 mkdir -p %{buildroot}/opt/epp-server/venv
 mkdir -p %{buildroot}/etc/epp-server
 mkdir -p %{buildroot}/etc/epp-server/tls
+mkdir -p %{buildroot}/etc/systemd/system/epp-server.service.d
 mkdir -p %{buildroot}/var/log/epp-server
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/lib/systemd/system
@@ -46,6 +47,7 @@ cp %{_sourcedir}/systemd/epp-server.service %{buildroot}/usr/lib/systemd/system/
 %config(noreplace) /etc/epp-server/epp.yaml
 %config(noreplace) /etc/epp-server/logging.yaml
 %dir /etc/epp-server/tls
+%dir /etc/systemd/system/epp-server.service.d
 %dir /var/log/epp-server
 %attr(755,root,root) /usr/bin/epp-server
 %attr(755,root,root) /usr/bin/epp-server-generate-certs
