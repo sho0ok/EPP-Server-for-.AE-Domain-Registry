@@ -9,7 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from database.pool import DatabasePool, get_pool
+from src.database.connection import get_pool, DatabasePool
 
 logger = logging.getLogger("epp.extension_repo")
 
