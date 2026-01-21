@@ -11,7 +11,7 @@ WorkingDirectory=/opt/epp-server
 Environment="PATH=/opt/epp-server/venv/bin:/usr/bin"
 Environment="EPP_CONFIG=/etc/epp-server/epp.yaml"
 Environment="EPP_LOG_CONFIG=/etc/epp-server/logging.yaml"
-ExecStart=/opt/epp-server/venv/bin/python -m src.main
+ExecStart=/opt/epp-server/venv/bin/python -m src.server
 Restart=always
 RestartSec=5
 StandardOutput=journal
