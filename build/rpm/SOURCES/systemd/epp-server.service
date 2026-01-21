@@ -21,7 +21,7 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/epp-server
+ReadWritePaths=/var/log/registryd
 ReadWritePaths=/etc/epp-server/tls
 
 [Install]
