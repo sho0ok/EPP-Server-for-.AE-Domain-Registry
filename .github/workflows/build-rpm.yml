@@ -46,6 +46,10 @@ jobs:
           pip install lxml oracledb cryptography pyyaml python-dateutil
           deactivate
 
+          # Fix venv paths to target location (/opt/epp-server/venv)
+          find build/rpmbuild/SOURCES/venv/bin -type f -exec sed -i "s|$PWD/build/rpmbuild/SOURCES/venv|/opt/epp-server/venv|g" {} \;
+          sed -i "s|$PWD/build/rpmbuild/SOURCES/venv|/opt/epp-server/venv|g" build/rpmbuild/SOURCES/venv/pyvenv.cfg 2>/dev/null || true
+
       - name: Build RPM
         run: |
           cp build/rpm/SPECS/epp-server.spec build/rpmbuild/SPECS/
