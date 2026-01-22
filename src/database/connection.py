@@ -86,8 +86,8 @@ class DatabasePool:
             logger.info(f"Creating Oracle connection pool: {self.user}@{self.dsn}")
             logger.info(f"Pool size: min={self.pool_min}, max={self.pool_max}")
 
-            # oracledb async pool creation
-            self._pool = oracledb.create_pool_async(
+            # Use synchronous pool creation (more stable)
+            self._pool = oracledb.create_pool(
                 user=self.user,
                 password=self._password,
                 dsn=self.dsn,
@@ -99,10 +99,11 @@ class DatabasePool:
             )
 
             # Test connection
-            async with self.acquire() as conn:
-                cursor = conn.cursor()
-                await cursor.execute("SELECT 1 FROM DUAL")
-                await cursor.close()
+            conn = self._pool.acquire()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM DUAL")
+            cursor.close()
+            self._pool.release(conn)
 
             logger.info("Database pool initialized successfully")
 
@@ -115,7 +116,7 @@ class DatabasePool:
         """Close the connection pool."""
         if self._pool is not None:
             try:
-                await self._pool.close()
+                self._pool.close()
                 logger.info("Database pool closed")
             except Exception as e:
                 logger.error(f"Error closing pool: {e}")
@@ -133,7 +134,7 @@ class DatabasePool:
                 ...
 
         Yields:
-            oracledb.AsyncConnection
+            oracledb.Connection
 
         Raises:
             ConnectionError: If pool not initialized or acquire fails
@@ -143,7 +144,7 @@ class DatabasePool:
 
         conn = None
         try:
-            conn = await self._pool.acquire()
+            conn = self._pool.acquire()
             yield conn
         except oracledb.Error as e:
             logger.error(f"Error acquiring connection: {e}")
@@ -151,7 +152,7 @@ class DatabasePool:
         finally:
             if conn is not None:
                 try:
-                    await self._pool.release(conn)
+                    self._pool.release(conn)
                 except Exception as e:
                     logger.error(f"Error releasing connection: {e}")
 
@@ -178,17 +179,17 @@ class DatabasePool:
         async with self.acquire() as conn:
             try:
                 cursor = conn.cursor()
-                await cursor.execute(sql, params or {})
+                cursor.execute(sql, params or {})
                 rowcount = cursor.rowcount
 
                 if commit:
-                    await conn.commit()
+                    conn.commit()
 
-                await cursor.close()
+                cursor.close()
                 return rowcount
 
             except oracledb.Error as e:
-                await conn.rollback()
+                conn.rollback()
                 logger.error(f"Query execution failed: {e}")
                 logger.debug(f"SQL: {sql}")
                 logger.debug(f"Params: {params}")
@@ -217,17 +218,17 @@ class DatabasePool:
         async with self.acquire() as conn:
             try:
                 cursor = conn.cursor()
-                await cursor.executemany(sql, params_list)
+                cursor.executemany(sql, params_list)
                 rowcount = cursor.rowcount
 
                 if commit:
-                    await conn.commit()
+                    conn.commit()
 
-                await cursor.close()
+                cursor.close()
                 return rowcount
 
             except oracledb.Error as e:
-                await conn.rollback()
+                conn.rollback()
                 logger.error(f"Batch execution failed: {e}")
                 raise QueryError(f"Batch execution failed: {e}") from e
 
@@ -252,16 +253,16 @@ class DatabasePool:
         async with self.acquire() as conn:
             try:
                 cursor = conn.cursor()
-                await cursor.execute(sql, params or {})
+                cursor.execute(sql, params or {})
 
                 # Get column names
                 columns = [col[0] for col in cursor.description]
 
                 # Fetch all rows as dictionaries
-                rows = await cursor.fetchall()
+                rows = cursor.fetchall()
                 result = [dict(zip(columns, row)) for row in rows]
 
-                await cursor.close()
+                cursor.close()
                 return result
 
             except oracledb.Error as e:
@@ -290,14 +291,14 @@ class DatabasePool:
         async with self.acquire() as conn:
             try:
                 cursor = conn.cursor()
-                await cursor.execute(sql, params or {})
+                cursor.execute(sql, params or {})
 
                 # Get column names
                 columns = [col[0] for col in cursor.description]
 
                 # Fetch one row
-                row = await cursor.fetchone()
-                await cursor.close()
+                row = cursor.fetchone()
+                cursor.close()
 
                 if row is None:
                     return None
@@ -329,10 +330,10 @@ class DatabasePool:
         async with self.acquire() as conn:
             try:
                 cursor = conn.cursor()
-                await cursor.execute(sql, params or {})
+                cursor.execute(sql, params or {})
 
-                row = await cursor.fetchone()
-                await cursor.close()
+                row = cursor.fetchone()
+                cursor.close()
 
                 if row is None:
                     return None
@@ -385,16 +386,16 @@ class DatabasePool:
         async with self.acquire() as conn:
             try:
                 cursor = conn.cursor()
-                result = await cursor.callproc(name, params or [])
+                result = cursor.callproc(name, params or [])
 
                 if commit:
-                    await conn.commit()
+                    conn.commit()
 
-                await cursor.close()
+                cursor.close()
                 return result
 
             except oracledb.Error as e:
-                await conn.rollback()
+                conn.rollback()
                 logger.error(f"Procedure call failed: {e}")
                 raise QueryError(f"Procedure call failed: {e}") from e
 
