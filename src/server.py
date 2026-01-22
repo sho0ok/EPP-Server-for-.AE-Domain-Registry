@@ -287,7 +287,7 @@ class EPPClientHandler:
 
         try:
             # Authenticate against database
-            account_repo = get_account_repo()
+            account_repo = await get_account_repo()
             user = await account_repo.authenticate_user(client_id, password)
 
             if user is None:
