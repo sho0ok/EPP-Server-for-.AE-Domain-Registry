@@ -288,7 +288,7 @@ class EPPClientHandler:
         try:
             # Authenticate against database
             account_repo = await get_account_repo()
-            user = await account_repo.authenticate_user(client_id, password)
+            user = await account_repo.validate_credentials(client_id, password)
 
             if user is None:
                 logger.warning(f"Authentication failed for {client_id} from {self.client_ip}")
@@ -299,9 +299,9 @@ class EPPClientHandler:
                 )
 
             # Check IP whitelist
-            ip_allowed = await account_repo.check_ip_whitelist(user.USR_ACC_ID, self.client_ip)
+            ip_allowed = await account_repo.check_ip_whitelist(user["USR_ACCOUNT_ID"], self.client_ip)
             if not ip_allowed:
-                logger.warning(f"IP {self.client_ip} not whitelisted for account {user.USR_ACC_ID}")
+                logger.warning(f"IP {self.client_ip} not whitelisted for account {user['USR_ACCOUNT_ID']}")
                 return self.response_builder.build_error(
                     code=2200,
                     message="Authentication error: IP address not authorized",
@@ -313,19 +313,19 @@ class EPPClientHandler:
 
             self.authenticated = True
             self.client_id = client_id
-            self.account_id = user.USR_ACC_ID
-            self.user_id = user.USR_ID
+            self.account_id = user["USR_ACCOUNT_ID"]
+            self.user_id = user["USR_ID"]
 
             # Update session info for command handlers
             if self.session:
                 self.session.authenticated = True
                 self.session.client_id = client_id
-                self.session.account_id = user.USR_ACC_ID
-                self.session.user_id = user.USR_ID
-                self.session.username = user.USR_NAME
+                self.session.account_id = user["USR_ACCOUNT_ID"]
+                self.session.user_id = user["USR_ID"]
+                self.session.username = user["USR_USERNAME"]
                 self.session.login_time = datetime.utcnow()
 
-            logger.info(f"Login successful: {client_id} (account {user.USR_ACC_ID}) from {self.client_ip}")
+            logger.info(f"Login successful: {client_id} (account {user['USR_ACCOUNT_ID']}) from {self.client_ip}")
 
             return self.response_builder.build_response(
                 code=1000,
