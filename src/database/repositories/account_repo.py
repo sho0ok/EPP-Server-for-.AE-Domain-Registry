@@ -338,6 +338,15 @@ class AccountRepository:
         Returns:
             True if IP is allowed
         """
+        # First, debug: show all IPs for this account
+        debug_sql = """
+            SELECT AEA_IP_ADDRESS, AEA_ACTIVE_DATE
+            FROM ACCOUNT_EPP_ADDRESSES
+            WHERE AEA_ACC_ID = :account_id
+        """
+        debug_rows = await self.pool.query(debug_sql, {"account_id": account_id})
+        logger.info(f"Whitelisted IPs for account {account_id}: {debug_rows}")
+
         sql = """
             SELECT COUNT(*) FROM ACCOUNT_EPP_ADDRESSES
             WHERE AEA_ACC_ID = :account_id
@@ -345,10 +354,13 @@ class AccountRepository:
               AND AEA_ACTIVE_DATE <= :today
         """
 
+        today = date.today()
+        logger.debug(f"Checking IP whitelist: account={account_id}, ip={ip_address}, today={today}")
+
         count = await self.pool.query_value(sql, {
             "account_id": account_id,
             "ip_address": ip_address,
-            "today": date.today()
+            "today": today
         })
 
         allowed = int(count) > 0 if count else False
