@@ -270,13 +270,15 @@ class DomainCreateHandler(ObjectCommandHandler):
                 reason=f"Zone {zone} not supported"
             )
 
-        # Check zone status
+        # Check zone status - 'N' means Not disabled (active), 'Y' means disabled
         zone_status = zone_config.get("ZON_STATUS")
-        if zone_status not in ("ACTIVE", "A"):
+        logger.debug(f"Zone {zone} config: {zone_config}")
+        logger.info(f"Zone {zone} status: '{zone_status}' (type: {type(zone_status).__name__})")
+        if zone_status not in ("N",):  # 'N' = Not disabled = Active
             raise CommandError(
                 2306,
                 "Parameter value policy error",
-                reason=f"Zone {zone} is not active"
+                reason=f"Zone {zone} is disabled (status: {zone_status})"
             )
 
         # Get zone ID for extension validation
@@ -354,7 +356,7 @@ class DomainCreateHandler(ObjectCommandHandler):
                 )
 
             # Debit account
-            await account_repo.debit(session.account_id, rate, f"Domain create: {domain_name}")
+            await account_repo.debit_balance(session.account_id, rate)
 
         except Exception as e:
             logger.error(f"Failed to create domain {domain_name}: {e}")
@@ -504,8 +506,16 @@ class DomainUpdateHandler(ObjectCommandHandler):
         rem_contacts = rem_data.get("contacts", [])
         add_nameservers = add_data.get("ns", [])
         rem_nameservers = rem_data.get("ns", [])
-        add_statuses = add_data.get("statuses", [])
-        rem_statuses = rem_data.get("statuses", [])
+        add_statuses_raw = add_data.get("statuses", [])
+        rem_statuses_raw = rem_data.get("statuses", [])
+
+        # Normalize statuses to strings (handle both "status" and {"s": "status"} formats)
+        add_statuses = [
+            s.get("s") if isinstance(s, dict) else s for s in add_statuses_raw
+        ]
+        rem_statuses = [
+            s.get("s") if isinstance(s, dict) else s for s in rem_statuses_raw
+        ]
 
         registrant_id = chg_data.get("registrant")
         auth_info = chg_data.get("authInfo")
@@ -518,7 +528,7 @@ class DomainUpdateHandler(ObjectCommandHandler):
 
         # Validate client can only modify client statuses
         for status in add_statuses + rem_statuses:
-            if status.startswith("server"):
+            if status and status.startswith("server"):
                 raise CommandError(
                     2306,
                     "Parameter value policy error",
@@ -536,8 +546,8 @@ class DomainUpdateHandler(ObjectCommandHandler):
                 rem_contacts=rem_contacts if rem_contacts else None,
                 add_nameservers=add_nameservers if add_nameservers else None,
                 rem_nameservers=rem_nameservers if rem_nameservers else None,
-                add_statuses=add_statuses if add_statuses else None,
-                rem_statuses=rem_statuses if rem_statuses else None
+                add_statuses=[s for s in add_statuses if s] if add_statuses else None,
+                rem_statuses=[s for s in rem_statuses if s] if rem_statuses else None
             )
         except Exception as e:
             logger.error(f"Failed to update domain {domain_name}: {e}")
@@ -724,7 +734,7 @@ class DomainRenewHandler(ObjectCommandHandler):
             )
 
             # Debit account
-            await account_repo.debit(session.account_id, rate, f"Domain renew: {domain_name}")
+            await account_repo.debit_balance(session.account_id, rate)
 
         except Exception as e:
             logger.error(f"Failed to renew domain {domain_name}: {e}")

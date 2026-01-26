@@ -333,7 +333,7 @@ class EPPClient:
         <contact:voice>{voice}</contact:voice>
         <contact:email>{email}</contact:email>
         <contact:authInfo>
-          <contact:pw>TestAuth123!</contact:pw>
+          <contact:pw>b#i7b#u-</contact:pw>
         </contact:authInfo>
       </contact:create>
     </create>
@@ -612,7 +612,7 @@ class EPPClient:
 
     def domain_create(self, domain: str, period: int, registrant: str,
                       admin: str, tech: str, ns: List[str],
-                      auth_info: str = "DomAuth123!") -> Tuple[int, str]:
+                      auth_info: str = "b#i7b#u-") -> Tuple[int, str]:
         """Create a domain."""
         cl_trid = self._get_cl_trid()
 
@@ -1091,6 +1091,23 @@ class EPPTestSuite:
         """Clean up test objects."""
         print("\n[CLEANUP]")
 
+        # Test contact delete with a standalone contact (not associated with any domain)
+        standalone_contact = f"DEL-{self.ctx.suffix}"
+        def create_standalone():
+            code, msg = self.client.contact_create(
+                contact_id=standalone_contact,
+                name="Delete Test Contact",
+                email="delete@example.ae",
+                city="Dubai",
+                country="AE"
+            )
+            return code, msg
+        self.run_test(f"Create Standalone Contact {standalone_contact}", "contact:create", create_standalone)
+
+        def delete_standalone():
+            return self.client.contact_delete(standalone_contact)
+        self.run_test(f"Delete Standalone Contact {standalone_contact}", "contact:delete", delete_standalone)
+
         # Delete domains first (they reference contacts/hosts)
         for domain in self.ctx.created_domains:
             def delete_domain(d=domain):
@@ -1103,11 +1120,8 @@ class EPPTestSuite:
                 return self.client.host_delete(h)
             self.run_test(f"Delete Host {host}", "host:delete", delete_host)
 
-        # Delete contacts
-        for contact in self.ctx.created_contacts:
-            def delete_contact(c=contact):
-                return self.client.contact_delete(c)
-            self.run_test(f"Delete Contact {contact}", "contact:delete", delete_contact)
+        # Note: Original contact cannot be deleted as it's still associated with domain in pending delete state
+        # This is correct EPP behavior - contacts linked to domains (even pending delete) cannot be removed
 
     def _print_summary(self):
         """Print test summary."""

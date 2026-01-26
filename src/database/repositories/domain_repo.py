@@ -521,11 +521,11 @@ class DomainRepository:
                 INSERT INTO REGISTRY_OBJECTS (
                     OBJ_ROID, OBJ_TYPE, OBJ_STATUS, OBJ_PASSWORD,
                     OBJ_CREATE_DATE, OBJ_CREATE_USER_ID,
-                    OBJ_MANAGE_ACCOUNT_ID
+                    OBJ_MANAGE_ACCOUNT_ID, OBJ_LOCKED
                 ) VALUES (
-                    :roid, 'DOMAIN', 'ACTIVE', :auth_info,
+                    :roid, 'Domain', 'Registered', :auth_info,
                     :create_date, :user_id,
-                    :account_id
+                    :account_id, 'N'
                 )
             """
             await conn.execute(obj_sql, {
@@ -536,15 +536,37 @@ class DomainRepository:
                 "account_id": account_id
             })
 
-            # Create domain registration record
+            # Insert into DOMAINS first (without registration ID due to circular FK)
+            # DOM_CANONICAL_FORM and DOM_ACTIVE_INDICATOR are NOT NULL
+            dom_sql = """
+                INSERT INTO DOMAINS (
+                    DOM_ROID, DOM_NAME, DOM_LABEL, DOM_CANONICAL_FORM,
+                    DOM_ZONE, DOM_REGISTRANT_ROID, DOM_REGISTRATION_ID,
+                    DOM_DNS_QUALIFIED, DOM_DNS_HOLD, DOM_ACTIVE_INDICATOR
+                ) VALUES (
+                    :roid, :domain_name, :label, :canonical_form,
+                    :zone, :registrant_roid, NULL,
+                    'N', 'N', :roid
+                )
+            """
+            await conn.execute(dom_sql, {
+                "roid": roid,
+                "domain_name": domain_name,
+                "label": label,
+                "canonical_form": domain_name,
+                "zone": zone,
+                "registrant_roid": registrant_roid
+            })
+
+            # Create domain registration record (now DOM_ROID exists for FK)
             reg_id = await conn.get_next_sequence("DRE_ID_SEQ")
             reg_sql = """
                 INSERT INTO DOMAIN_REGISTRATIONS (
-                    DRE_ID, DRE_DOMAIN_ROID, DRE_PERIOD, DRE_UNIT,
+                    DRE_ID, DRE_ROID, DRE_SEQ, DRE_PERIOD, DRE_UNIT,
                     DRE_START_DATE, DRE_EXPIRE_DATE, DRE_STATUS
                 ) VALUES (
-                    :reg_id, :roid, :period, :unit,
-                    :start_date, :expire_date, 'ACTIVE'
+                    :reg_id, :roid, 1, :period, :unit,
+                    :start_date, :expire_date, 'approved'
                 )
             """
             await conn.execute(reg_sql, {
@@ -556,25 +578,14 @@ class DomainRepository:
                 "expire_date": expiry_date
             })
 
-            # Insert into DOMAINS
-            dom_sql = """
-                INSERT INTO DOMAINS (
-                    DOM_ROID, DOM_NAME, DOM_LABEL, DOM_ZONE,
-                    DOM_REGISTRANT_ROID, DOM_REGISTRATION_ID,
-                    DOM_DNS_QUALIFIED, DOM_DNS_HOLD
-                ) VALUES (
-                    :roid, :domain_name, :label, :zone,
-                    :registrant_roid, :reg_id,
-                    'N', 'N'
-                )
+            # Update DOMAINS with registration ID
+            update_dom_sql = """
+                UPDATE DOMAINS SET DOM_REGISTRATION_ID = :reg_id
+                WHERE DOM_ROID = :roid
             """
-            await conn.execute(dom_sql, {
-                "roid": roid,
-                "domain_name": domain_name,
-                "label": label,
-                "zone": zone,
-                "registrant_roid": registrant_roid,
-                "reg_id": reg_id
+            await conn.execute(update_dom_sql, {
+                "reg_id": reg_id,
+                "roid": roid
             })
 
             # Add contacts
@@ -801,10 +812,11 @@ class DomainRepository:
                         {"roid": roid, "status": status}
                     )
                 # Add 'ok' if no statuses remain
-                count = await conn.query_value(
-                    "SELECT COUNT(*) FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+                result = await conn.query_one(
+                    "SELECT COUNT(*) AS cnt FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
                     {"roid": roid}
                 )
+                count = result.get("cnt", 0) if result else 0
                 if count == 0:
                     await conn.execute(
                         "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'ok')",
@@ -861,7 +873,7 @@ class DomainRepository:
                     {"roid": roid}
                 )
                 await conn.execute(
-                    "DELETE FROM DOMAIN_REGISTRATIONS WHERE DRE_DOMAIN_ROID = :roid",
+                    "DELETE FROM DOMAIN_REGISTRATIONS WHERE DRE_ROID = :roid",
                     {"roid": roid}
                 )
                 await conn.execute(
@@ -869,7 +881,7 @@ class DomainRepository:
                     {"roid": roid}
                 )
                 await conn.execute(
-                    "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'DELETED' WHERE OBJ_ROID = :roid",
+                    "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'Deleted' WHERE OBJ_ROID = :roid",
                     {"roid": roid}
                 )
                 logger.info(f"Deleted domain (immediate): {domain_name}")
@@ -884,7 +896,7 @@ class DomainRepository:
                     {"roid": roid}
                 )
                 await conn.execute(
-                    "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'PENDING_DELETE' WHERE OBJ_ROID = :roid",
+                    "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'Pending Delete' WHERE OBJ_ROID = :roid",
                     {"roid": roid}
                 )
                 logger.info(f"Marked domain for deletion: {domain_name}")
@@ -945,7 +957,7 @@ class DomainRepository:
         reg_sql = """
             SELECT DRE_ID, DRE_EXPIRE_DATE
             FROM DOMAIN_REGISTRATIONS
-            WHERE DRE_DOMAIN_ROID = :roid AND DRE_STATUS = 'ACTIVE'
+            WHERE DRE_ROID = :roid AND DRE_STATUS = 'approved'
         """
         reg = await self.pool.query_one(reg_sql, {"roid": roid})
         if not reg:
@@ -1132,7 +1144,7 @@ class DomainRepository:
         async with self.pool.transaction() as conn:
             # Update transfer status
             await conn.execute(
-                "UPDATE TRANSFERS SET TRX_STATUS = 'approved', TRX_ACCEPT_DATE = :now WHERE TRX_ID = :trx_id",
+                "UPDATE TRANSFERS SET TRX_STATUS = 'clientApproved', TRX_ACCEPT_DATE = :now WHERE TRX_ID = :trx_id",
                 {"now": now, "trx_id": transfer["TRX_ID"]}
             )
 
@@ -1148,10 +1160,11 @@ class DomainRepository:
                 {"roid": roid}
             )
             # Add ok if no other statuses
-            count = await conn.query_value(
-                "SELECT COUNT(*) FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+            result = await conn.query_one(
+                "SELECT COUNT(*) AS cnt FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
                 {"roid": roid}
             )
+            count = result.get("cnt", 0) if result else 0
             if count == 0:
                 await conn.execute(
                     "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'ok')",
@@ -1162,7 +1175,7 @@ class DomainRepository:
             if transfer.get("TRX_PERIOD"):
                 period = transfer["TRX_PERIOD"]
                 unit = transfer.get("TRX_UNIT", "y")
-                reg_sql = "SELECT DRE_ID, DRE_EXPIRE_DATE FROM DOMAIN_REGISTRATIONS WHERE DRE_DOMAIN_ROID = :roid AND DRE_STATUS = 'ACTIVE'"
+                reg_sql = "SELECT DRE_ID, DRE_EXPIRE_DATE FROM DOMAIN_REGISTRATIONS WHERE DRE_ROID = :roid AND DRE_STATUS = 'approved'"
                 reg = await conn.query_one(reg_sql, {"roid": roid})
                 if reg:
                     if unit == "y":
@@ -1201,7 +1214,7 @@ class DomainRepository:
         async with self.pool.transaction() as conn:
             # Update transfer status
             await conn.execute(
-                "UPDATE TRANSFERS SET TRX_STATUS = 'rejected' WHERE TRX_ID = :trx_id",
+                "UPDATE TRANSFERS SET TRX_STATUS = 'clientRejected' WHERE TRX_ID = :trx_id",
                 {"trx_id": transfer["TRX_ID"]}
             )
 
@@ -1210,10 +1223,11 @@ class DomainRepository:
                 "DELETE FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid AND EDS_STATUS = 'pendingTransfer'",
                 {"roid": roid}
             )
-            count = await conn.query_value(
-                "SELECT COUNT(*) FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+            result = await conn.query_one(
+                "SELECT COUNT(*) AS cnt FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
                 {"roid": roid}
             )
+            count = result.get("cnt", 0) if result else 0
             if count == 0:
                 await conn.execute(
                     "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'ok')",
@@ -1245,17 +1259,18 @@ class DomainRepository:
 
         async with self.pool.transaction() as conn:
             await conn.execute(
-                "UPDATE TRANSFERS SET TRX_STATUS = 'cancelled' WHERE TRX_ID = :trx_id",
+                "UPDATE TRANSFERS SET TRX_STATUS = 'clientCancelled' WHERE TRX_ID = :trx_id",
                 {"trx_id": transfer["TRX_ID"]}
             )
             await conn.execute(
                 "DELETE FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid AND EDS_STATUS = 'pendingTransfer'",
                 {"roid": roid}
             )
-            count = await conn.query_value(
-                "SELECT COUNT(*) FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+            result = await conn.query_one(
+                "SELECT COUNT(*) AS cnt FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
                 {"roid": roid}
             )
+            count = result.get("cnt", 0) if result else 0
             if count == 0:
                 await conn.execute(
                     "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'ok')",

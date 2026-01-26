@@ -465,11 +465,11 @@ class HostRepository:
                 INSERT INTO REGISTRY_OBJECTS (
                     OBJ_ROID, OBJ_TYPE, OBJ_STATUS,
                     OBJ_CREATE_DATE, OBJ_CREATE_USER_ID,
-                    OBJ_MANAGE_ACCOUNT_ID
+                    OBJ_MANAGE_ACCOUNT_ID, OBJ_LOCKED
                 ) VALUES (
-                    :roid, 'HOST', 'ACTIVE',
+                    :roid, 'Host', 'Registered',
                     :create_date, :user_id,
-                    :account_id
+                    :account_id, 'N'
                 )
             """
             await conn.execute(obj_sql, {
@@ -676,10 +676,11 @@ class HostRepository:
                     )
 
                 # Add 'ok' if no statuses remain
-                count = await conn.query_value(
-                    "SELECT COUNT(*) FROM EPP_HOST_STATUSES WHERE EHS_ROID = :roid",
+                result = await conn.query_one(
+                    "SELECT COUNT(*) AS cnt FROM EPP_HOST_STATUSES WHERE EHS_ROID = :roid",
                     {"roid": roid}
                 )
+                count = result.get("cnt", 0) if result else 0
                 if count == 0:
                     await conn.execute(
                         "INSERT INTO EPP_HOST_STATUSES (EHS_ROID, EHS_STATUS) VALUES (:roid, 'ok')",
@@ -780,7 +781,7 @@ class HostRepository:
 
             # Update REGISTRY_OBJECTS status (or delete)
             await conn.execute(
-                "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'DELETED' WHERE OBJ_ROID = :roid",
+                "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'Deleted' WHERE OBJ_ROID = :roid",
                 {"roid": roid}
             )
 

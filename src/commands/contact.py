@@ -242,7 +242,19 @@ class ContactCreateHandler(ObjectCommandHandler):
         else:
             auth_info = generate_auth_info()
 
+        # Extract postal info - prefer international, fallback to localized
+        postal = postal_int or postal_loc or {}
+
+        # Handle street - can be string or list (street is directly in postal, not nested in addr)
+        street = postal.get("street", [])
+        if isinstance(street, str):
+            street = [street]
+        street1 = street[0] if len(street) > 0 else None
+        street2 = street[1] if len(street) > 1 else None
+        street3 = street[2] if len(street) > 2 else None
+
         # Create contact
+        # Note: city, sp, pc, cc are directly in postal dict, not nested under addr
         try:
             contact = await contact_repo.create(
                 contact_id=contact_id,
@@ -251,13 +263,19 @@ class ContactCreateHandler(ObjectCommandHandler):
                 user_id=session.user_id,
                 email=email,
                 auth_info=auth_info,
-                voice=voice,
-                voice_ext=data.get("voice_ext"),
+                name=postal.get("name"),
+                org=postal.get("org"),
+                street1=street1,
+                street2=street2,
+                street3=street3,
+                city=postal.get("city"),
+                state=postal.get("sp"),
+                postcode=postal.get("pc"),
+                country=postal.get("cc"),
+                phone=voice,
+                phone_ext=data.get("voice_ext"),
                 fax=fax,
-                fax_ext=data.get("fax_ext"),
-                postal_info_int=postal_int,
-                postal_info_loc=postal_loc,
-                disclose=data.get("disclose")
+                fax_ext=data.get("fax_ext")
             )
         except Exception as e:
             logger.error(f"Failed to create contact {contact_id}: {e}")
@@ -368,14 +386,11 @@ class ContactUpdateHandler(ObjectCommandHandler):
                 contact_id=contact_id,
                 user_id=session.user_id,
                 email=chg_data.get("email"),
-                voice=chg_data.get("voice"),
-                voice_ext=chg_data.get("voice_ext"),
+                phone=chg_data.get("voice"),
+                phone_ext=chg_data.get("voice_ext"),
                 fax=chg_data.get("fax"),
                 fax_ext=chg_data.get("fax_ext"),
                 auth_info=chg_data.get("authInfo"),
-                postal_info_int=chg_data.get("postalInfo_int"),
-                postal_info_loc=chg_data.get("postalInfo_loc"),
-                disclose=chg_data.get("disclose"),
                 add_statuses=add_statuses,
                 rem_statuses=rem_statuses
             )

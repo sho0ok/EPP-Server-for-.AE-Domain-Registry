@@ -36,7 +36,7 @@ class ExtensionRepository:
         """
         sql = """
             SELECT ze.ZON_EXT_ID, ze.ZON_ID, ze.EXT_ID,
-                   e.EXT_NAME, e.EXT_URI, e.EXT_SCHEMA
+                   e.CODE AS EXT_CODE, e.EXT_DESCRIPTION
             FROM ZONE_EXTENSIONS ze
             JOIN EXTENSIONS e ON ze.EXT_ID = e.EXT_ID
             WHERE ze.ZON_ID = :zone_id
@@ -58,12 +58,12 @@ class ExtensionRepository:
         """
         sql = """
             SELECT ze.ZON_EXT_ID, ze.ZON_ID, ze.EXT_ID,
-                   e.EXT_NAME, e.EXT_URI, e.EXT_SCHEMA
+                   e.CODE AS EXT_CODE, e.EXT_DESCRIPTION
             FROM ZONE_EXTENSIONS ze
             JOIN EXTENSIONS e ON ze.EXT_ID = e.EXT_ID
-            WHERE ze.ZON_ID = :zone_id AND e.EXT_NAME = :ext_name
+            WHERE ze.ZON_ID = :zone_id AND e.CODE = :ext_code
         """
-        return await self.pool.query_one(sql, {"zone_id": zone_id, "ext_name": ext_name})
+        return await self.pool.query_one(sql, {"zone_id": zone_id, "ext_code": ext_name})
 
     async def get_required_extension_fields(
         self, zone_id: int
@@ -78,12 +78,12 @@ class ExtensionRepository:
             List of required fields with their configurations
         """
         sql = """
-            SELECT zei.ZON_EXT_ITEM_ID, zei.ZON_ID, zei.EXT_ITEM_ID, zei.REQUIRED,
-                   ei.EXT_ITEM_NAME, ei.EXT_ID,
+            SELECT zei.ZON_EXT_ITEM_ID, zei.ZON_ID, zei.EXT_ITEM_ID, zei.MANDATORY,
+                   ei.ITEM_LABEL, ei.EXT_ID,
                    eif.EXT_ITEM_FIELD_ID, eif.FIELD_KEY, eif.FIELD_LABEL,
-                   eif.FIELD_TYPE, eif.FIELD_REQUIRED,
-                   eif.FIELD_MIN_LENGTH, eif.FIELD_MAX_LENGTH, eif.FIELD_PATTERN,
-                   e.EXT_NAME, e.EXT_URI,
+                   eif.FIELD_ITEM_TYPE_ID,
+                   eif.FIELD_MIN_LENGTH, eif.FIELD_MAX_LENGTH,
+                   e.CODE AS EXT_CODE, e.EXT_DESCRIPTION,
                    ze.ZON_EXT_ID
             FROM ZONE_EXT_ITEMS zei
             JOIN EXT_ITEMS ei ON zei.EXT_ITEM_ID = ei.EXT_ITEM_ID
@@ -91,7 +91,7 @@ class ExtensionRepository:
             JOIN EXTENSIONS e ON ei.EXT_ID = e.EXT_ID
             JOIN ZONE_EXTENSIONS ze ON ze.ZON_ID = zei.ZON_ID AND ze.EXT_ID = e.EXT_ID
             WHERE zei.ZON_ID = :zone_id
-            ORDER BY e.EXT_NAME, ei.EXT_ITEM_NAME, eif.FIELD_KEY
+            ORDER BY e.CODE, ei.ITEM_LABEL, eif.FIELD_KEY
         """
         return await self.pool.query(sql, {"zone_id": zone_id})
 
@@ -155,18 +155,17 @@ class ExtensionRepository:
             List of extension field values
         """
         sql = """
-            SELECT def.DEF_ID, def.DOM_ROID, def.ZON_EXT_ID,
-                   def.EXT_ITEM_FIELD_ID, def.VALUE, def.VALUE_DATE,
-                   def.CREATED_DATE, def.UPDATED_DATE,
-                   eif.FIELD_KEY, eif.FIELD_LABEL, eif.FIELD_TYPE,
-                   ei.EXT_ITEM_NAME,
-                   e.EXT_NAME, e.EXT_URI
+            SELECT def.DOMAIN_FIELD_ID, def.DOM_ROID, def.ZON_EXT_ID,
+                   def.EXT_ITEM_FIELD_ID, def.VALUE, def.UPDATE_DATE,
+                   eif.FIELD_KEY, eif.FIELD_LABEL, eif.FIELD_ITEM_TYPE_ID,
+                   ei.ITEM_LABEL,
+                   e.CODE AS EXT_CODE, e.EXT_DESCRIPTION
             FROM DOMAIN_EXT_FIELD_DATA def
             JOIN EXT_ITEM_FIELDS eif ON def.EXT_ITEM_FIELD_ID = eif.EXT_ITEM_FIELD_ID
             JOIN EXT_ITEMS ei ON eif.EXT_ITEM_ID = ei.EXT_ITEM_ID
             JOIN EXTENSIONS e ON ei.EXT_ID = e.EXT_ID
             WHERE def.DOM_ROID = :domain_roid
-            ORDER BY e.EXT_NAME, eif.FIELD_KEY
+            ORDER BY e.CODE, eif.FIELD_KEY
         """
         return await self.pool.query(sql, {"domain_roid": domain_roid})
 
@@ -175,8 +174,7 @@ class ExtensionRepository:
         domain_roid: str,
         zon_ext_id: int,
         ext_item_field_id: int,
-        value: str,
-        value_date: Optional[date] = None
+        value: str
     ) -> int:
         """
         Save extension field data for a domain.
@@ -186,50 +184,36 @@ class ExtensionRepository:
             zon_ext_id: Zone extension ID
             ext_item_field_id: Extension item field ID
             value: Field value
-            value_date: Date value (for date fields)
 
         Returns:
             New record ID
         """
-        sql = """
-            INSERT INTO DOMAIN_EXT_FIELD_DATA (
-                DEF_ID, DOM_ROID, ZON_EXT_ID, EXT_ITEM_FIELD_ID,
-                VALUE, VALUE_DATE, CREATED_DATE, UPDATED_DATE
-            ) VALUES (
-                DEF_ID_SEQ.NEXTVAL, :domain_roid, :zon_ext_id, :ext_item_field_id,
-                :value, :value_date, SYSDATE, SYSDATE
-            ) RETURNING DEF_ID INTO :def_id
-        """
-        # For Oracle, we need to handle RETURNING differently
-        # Using a simpler approach
         insert_sql = """
             INSERT INTO DOMAIN_EXT_FIELD_DATA (
-                DEF_ID, DOM_ROID, ZON_EXT_ID, EXT_ITEM_FIELD_ID,
-                VALUE, VALUE_DATE, CREATED_DATE, UPDATED_DATE
+                DOMAIN_FIELD_ID, DOM_ROID, ZON_EXT_ID, EXT_ITEM_FIELD_ID,
+                VALUE, UPDATE_DATE
             ) VALUES (
-                DEF_ID_SEQ.NEXTVAL, :domain_roid, :zon_ext_id, :ext_item_field_id,
-                :value, :value_date, SYSDATE, SYSDATE
+                DOMAIN_FIELD_ID_SEQ.NEXTVAL, :domain_roid, :zon_ext_id, :ext_item_field_id,
+                :value, SYSDATE
             )
         """
         await self.pool.execute(insert_sql, {
             "domain_roid": domain_roid,
             "zon_ext_id": zon_ext_id,
             "ext_item_field_id": ext_item_field_id,
-            "value": value,
-            "value_date": value_date
+            "value": value
         })
 
         # Get the ID
-        id_sql = "SELECT DEF_ID_SEQ.CURRVAL AS def_id FROM DUAL"
+        id_sql = "SELECT DOMAIN_FIELD_ID_SEQ.CURRVAL AS domain_field_id FROM DUAL"
         result = await self.pool.query_one(id_sql, {})
-        return result.get("def_id", 0) if result else 0
+        return result.get("domain_field_id", 0) if result else 0
 
     async def update_domain_extension_data(
         self,
         domain_roid: str,
         ext_item_field_id: int,
-        value: str,
-        value_date: Optional[date] = None
+        value: str
     ) -> bool:
         """
         Update extension field data for a domain.
@@ -238,7 +222,6 @@ class ExtensionRepository:
             domain_roid: Domain ROID
             ext_item_field_id: Extension item field ID
             value: New field value
-            value_date: New date value (for date fields)
 
         Returns:
             True if updated, False if not found
@@ -246,16 +229,14 @@ class ExtensionRepository:
         sql = """
             UPDATE DOMAIN_EXT_FIELD_DATA
             SET VALUE = :value,
-                VALUE_DATE = :value_date,
-                UPDATED_DATE = SYSDATE
+                UPDATE_DATE = SYSDATE
             WHERE DOM_ROID = :domain_roid
               AND EXT_ITEM_FIELD_ID = :ext_item_field_id
         """
         result = await self.pool.execute(sql, {
             "domain_roid": domain_roid,
             "ext_item_field_id": ext_item_field_id,
-            "value": value,
-            "value_date": value_date
+            "value": value
         })
         return result > 0
 
@@ -300,13 +281,13 @@ class ExtensionRepository:
             # No extensions required for this zone
             return errors
 
-        # Group by extension name
+        # Group by extension code
         fields_by_ext: Dict[str, List[Dict]] = {}
         for field in required_fields:
-            ext_name = field["EXT_NAME"]
-            if ext_name not in fields_by_ext:
-                fields_by_ext[ext_name] = []
-            fields_by_ext[ext_name].append(field)
+            ext_code = field["EXT_CODE"]
+            if ext_code not in fields_by_ext:
+                fields_by_ext[ext_code] = []
+            fields_by_ext[ext_code].append(field)
 
         # Check each required extension
         for ext_name, fields in fields_by_ext.items():
@@ -314,13 +295,13 @@ class ExtensionRepository:
 
             for field in fields:
                 field_key = field["FIELD_KEY"]
-                field_required = field["FIELD_REQUIRED"] == "Y"
-                field_type = field["FIELD_TYPE"]
+                # MANDATORY is 'true'/'false' or 'Y'/'N' in ZONE_EXT_ITEMS
+                field_mandatory = field.get("MANDATORY") in ("true", "Y", True)
 
                 value = ext_data.get(field_key)
 
                 # Check required fields
-                if field_required and not value:
+                if field_mandatory and not value:
                     errors.append(
                         f"Missing required field '{field_key}' for extension '{ext_name}'"
                     )
@@ -341,22 +322,12 @@ class ExtensionRepository:
                             f"Field '{field_key}' must not exceed {max_len} characters"
                         )
 
-                    # Validate pattern
-                    pattern = field.get("FIELD_PATTERN")
-                    if pattern:
-                        import re
-                        if not re.match(pattern, value):
-                            errors.append(
-                                f"Field '{field_key}' does not match required format"
-                            )
-
-                    # Validate enum values
-                    if field_type == "enum":
-                        field_id = field["EXT_ITEM_FIELD_ID"]
-                        if not await self.validate_field_value(field_id, value):
-                            allowed = await self.get_field_allowed_values(field_id)
-                            allowed_codes = [v["VALUE_CODE"] for v in allowed]
-                            errors.append(
+                    # Validate enum values if field type is select/enum (type_id might vary)
+                    field_id = field["EXT_ITEM_FIELD_ID"]
+                    allowed = await self.get_field_allowed_values(field_id)
+                    if allowed and not await self.validate_field_value(field_id, value):
+                        allowed_codes = [v["VALUE_CODE"] for v in allowed]
+                        errors.append(
                                 f"Invalid value '{value}' for field '{field_key}'. "
                                 f"Allowed values: {', '.join(allowed_codes)}"
                             )
@@ -379,23 +350,22 @@ class ExtensionRepository:
 
         result: Dict[str, Dict[str, Any]] = {}
         for field in fields:
-            ext_name = field["EXT_NAME"]
-            if ext_name not in result:
-                result[ext_name] = {
-                    "uri": field["EXT_URI"],
+            ext_code = field["EXT_CODE"]
+            if ext_code not in result:
+                result[ext_code] = {
+                    "description": field["EXT_DESCRIPTION"],
                     "zon_ext_id": field["ZON_EXT_ID"],
                     "fields": {}
                 }
 
             field_key = field["FIELD_KEY"]
-            result[ext_name]["fields"][field_key] = {
+            result[ext_code]["fields"][field_key] = {
                 "field_id": field["EXT_ITEM_FIELD_ID"],
                 "label": field["FIELD_LABEL"],
-                "type": field["FIELD_TYPE"],
-                "required": field["FIELD_REQUIRED"] == "Y",
+                "type_id": field.get("FIELD_ITEM_TYPE_ID"),
+                "mandatory": field.get("MANDATORY") in ("true", "Y", True),
                 "min_length": field.get("FIELD_MIN_LENGTH"),
-                "max_length": field.get("FIELD_MAX_LENGTH"),
-                "pattern": field.get("FIELD_PATTERN")
+                "max_length": field.get("FIELD_MAX_LENGTH")
             }
 
         return result

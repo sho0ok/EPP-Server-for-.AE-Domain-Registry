@@ -8,6 +8,7 @@ Handles all contact-related database operations including:
 """
 
 import logging
+import hashlib
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -437,70 +438,72 @@ class ContactRepository:
         """
         now = datetime.utcnow()
 
-        # Insert into REGISTRY_OBJECTS
-        sql_obj = """
-            INSERT INTO REGISTRY_OBJECTS (
-                OBJ_ROID, OBJ_TYPE, OBJ_PASSWORD, OBJ_STATUS,
-                OBJ_CREATE_DATE, OBJ_CREATE_USER_ID, OBJ_MANAGE_ACCOUNT_ID,
-                OBJ_LOCKED
-            ) VALUES (
-                :roid, 'contact', :auth_info, 'ok',
-                :create_date, :user_id, :account_id,
-                'N'
+        # Use transaction to ensure all inserts are on same connection
+        async with self.pool.transaction() as conn:
+            # Insert into REGISTRY_OBJECTS first
+            # Note: OBJ_TYPE must be 'Contact' per OBJ_PASSWORD_CK constraint
+            sql_obj = """
+                INSERT INTO REGISTRY_OBJECTS (
+                    OBJ_ROID, OBJ_TYPE, OBJ_PASSWORD, OBJ_STATUS,
+                    OBJ_CREATE_DATE, OBJ_CREATE_USER_ID, OBJ_MANAGE_ACCOUNT_ID,
+                    OBJ_LOCKED
+                ) VALUES (
+                    :roid, 'Contact', :auth_info, 'Registered',
+                    :create_date, :user_id, :account_id,
+                    'N'
+                )
+            """
+            await conn.execute(sql_obj, {
+                "roid": roid,
+                "auth_info": auth_info,
+                "create_date": now,
+                "user_id": user_id,
+                "account_id": account_id
+            })
+
+            # Insert into CONTACTS
+            sql_con = """
+                INSERT INTO CONTACTS (
+                    CON_ROID, CON_UID, CON_NAME, CON_ORG,
+                    CON_STREET1, CON_STREET2, CON_STREET3,
+                    CON_CITY, CON_STATE, CON_POSTCODE, CON_COUNTRY,
+                    CON_PHONE, CON_PHONE_EXT, CON_FAX, CON_FAX_EXT,
+                    CON_EMAIL
+                ) VALUES (
+                    :roid, :contact_id, :name, :org,
+                    :street1, :street2, :street3,
+                    :city, :state, :postcode, :country,
+                    :phone, :phone_ext, :fax, :fax_ext,
+                    :email
+                )
+            """
+            await conn.execute(sql_con, {
+                "roid": roid,
+                "contact_id": contact_id,
+                "name": name,
+                "org": org,
+                "street1": street1,
+                "street2": street2,
+                "street3": street3,
+                "city": city,
+                "state": state,
+                "postcode": postcode,
+                "country": country.lower() if country else None,
+                "phone": phone,
+                "phone_ext": phone_ext,
+                "fax": fax,
+                "fax_ext": fax_ext,
+                "email": email
+            })
+
+            # Add default 'ok' status
+            await conn.execute(
+                "INSERT INTO EPP_CONTACT_STATUSES (ECS_ROID, ECS_STATUS) VALUES (:roid, 'ok')",
+                {"roid": roid}
             )
-        """
-        await self.pool.execute(sql_obj, {
-            "roid": roid,
-            "auth_info": auth_info,
-            "create_date": now,
-            "user_id": user_id,
-            "account_id": account_id
-        }, commit=False)
-
-        # Insert into CONTACTS
-        sql_con = """
-            INSERT INTO CONTACTS (
-                CON_ROID, CON_UID, CON_NAME, CON_ORG,
-                CON_STREET1, CON_STREET2, CON_STREET3,
-                CON_CITY, CON_STATE, CON_POSTCODE, CON_COUNTRY,
-                CON_PHONE, CON_PHONE_EXT, CON_FAX, CON_FAX_EXT,
-                CON_EMAIL
-            ) VALUES (
-                :roid, :contact_id, :name, :org,
-                :street1, :street2, :street3,
-                :city, :state, :postcode, :country,
-                :phone, :phone_ext, :fax, :fax_ext,
-                :email
-            )
-        """
-        await self.pool.execute(sql_con, {
-            "roid": roid,
-            "contact_id": contact_id,
-            "name": name,
-            "org": org,
-            "street1": street1,
-            "street2": street2,
-            "street3": street3,
-            "city": city,
-            "state": state,
-            "postcode": postcode,
-            "country": country,
-            "phone": phone,
-            "phone_ext": phone_ext,
-            "fax": fax,
-            "fax_ext": fax_ext,
-            "email": email
-        }, commit=False)
-
-        # Add default status
-        await self._add_status(roid, "ok", commit=False)
-
-        # Commit transaction
-        async with self.pool.acquire() as conn:
-            await conn.commit()
 
         logger.info(f"Created contact {contact_id} with ROID {roid}")
-        return roid
+        return {"roid": roid, "crDate": now.strftime("%Y-%m-%dT%H:%M:%S.0Z")}
 
     # ========================================================================
     # Update Operations
@@ -558,7 +561,7 @@ class ContactRepository:
             "city": ("CON_CITY", city),
             "state": ("CON_STATE", state),
             "postcode": ("CON_POSTCODE", postcode),
-            "country": ("CON_COUNTRY", country),
+            "country": ("CON_COUNTRY", country.lower() if country else None),
             "phone": ("CON_PHONE", phone),
             "phone_ext": ("CON_PHONE_EXT", phone_ext),
             "fax": ("CON_FAX", fax),
@@ -571,39 +574,37 @@ class ContactRepository:
                 contact_updates.append(f"{col} = :{key}")
                 contact_params[key] = val
 
-        if contact_updates:
-            sql = f"UPDATE CONTACTS SET {', '.join(contact_updates)} WHERE CON_UID = :contact_id"
-            await self.pool.execute(sql, contact_params, commit=False)
+        # Use transaction to ensure all updates are on same connection
+        async with self.pool.transaction() as conn:
+            if contact_updates:
+                sql = f"UPDATE CONTACTS SET {', '.join(contact_updates)} WHERE CON_UID = :contact_id"
+                await conn.execute(sql, contact_params)
 
-        # Update registry object
-        obj_updates = ["OBJ_UPDATE_DATE = :update_date", "OBJ_UPDATE_USER_ID = :user_id"]
-        obj_params = {"roid": roid, "update_date": now, "user_id": user_id}
+            # Update registry object
+            obj_updates = ["OBJ_UPDATE_DATE = :update_date", "OBJ_UPDATE_USER_ID = :user_id"]
+            obj_params = {"roid": roid, "update_date": now, "user_id": user_id}
 
-        if auth_info is not None:
-            obj_updates.append("OBJ_PASSWORD = :auth_info")
-            obj_params["auth_info"] = auth_info
+            if auth_info is not None:
+                obj_updates.append("OBJ_PASSWORD = :auth_info")
+                obj_params["auth_info"] = auth_info
 
-        sql = f"UPDATE REGISTRY_OBJECTS SET {', '.join(obj_updates)} WHERE OBJ_ROID = :roid"
-        await self.pool.execute(sql, obj_params, commit=False)
+            sql = f"UPDATE REGISTRY_OBJECTS SET {', '.join(obj_updates)} WHERE OBJ_ROID = :roid"
+            await conn.execute(sql, obj_params)
 
-        # Handle status changes
-        if rem_statuses:
-            for status in rem_statuses:
-                await self._remove_status(roid, status, commit=False)
+            # Handle status changes
+            if rem_statuses:
+                for status in rem_statuses:
+                    await conn.execute(
+                        "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid AND ECS_STATUS = :status",
+                        {"roid": roid, "status": status}
+                    )
 
-        if add_statuses:
-            for status in add_statuses:
-                await self._add_status(
-                    roid,
-                    status["s"],
-                    status.get("lang"),
-                    status.get("reason"),
-                    commit=False
-                )
-
-        # Commit transaction
-        async with self.pool.acquire() as conn:
-            await conn.commit()
+            if add_statuses:
+                for status in add_statuses:
+                    await conn.execute(
+                        "INSERT INTO EPP_CONTACT_STATUSES (ECS_ROID, ECS_STATUS, ECS_LANG, ECS_REASON) VALUES (:roid, :status, :lang, :reason)",
+                        {"roid": roid, "status": status["s"], "lang": status.get("lang"), "reason": status.get("reason")}
+                    )
 
         logger.info(f"Updated contact {contact_id}")
 
@@ -630,30 +631,31 @@ class ContactRepository:
         if in_use:
             raise ValueError(f"Cannot delete contact: {reason}")
 
-        # Delete statuses
-        await self.pool.execute(
-            "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid",
-            {"roid": roid},
-            commit=False
-        )
+        # Use transaction to ensure all deletes are on same connection
+        async with self.pool.transaction() as conn:
+            # Delete statuses first (child records)
+            await conn.execute(
+                "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid",
+                {"roid": roid}
+            )
 
-        # Delete contact
-        await self.pool.execute(
-            "DELETE FROM CONTACTS WHERE CON_ROID = :roid",
-            {"roid": roid},
-            commit=False
-        )
+            # Delete transaction records (references REGISTRY_OBJECTS)
+            await conn.execute(
+                "DELETE FROM TRANSACTIONS WHERE TRN_ROID = :roid",
+                {"roid": roid}
+            )
 
-        # Delete registry object
-        await self.pool.execute(
-            "DELETE FROM REGISTRY_OBJECTS WHERE OBJ_ROID = :roid",
-            {"roid": roid},
-            commit=False
-        )
+            # Delete contact
+            await conn.execute(
+                "DELETE FROM CONTACTS WHERE CON_ROID = :roid",
+                {"roid": roid}
+            )
 
-        # Commit transaction
-        async with self.pool.acquire() as conn:
-            await conn.commit()
+            # Delete registry object
+            await conn.execute(
+                "DELETE FROM REGISTRY_OBJECTS WHERE OBJ_ROID = :roid",
+                {"roid": roid}
+            )
 
         logger.info(f"Deleted contact {contact_id}")
 
