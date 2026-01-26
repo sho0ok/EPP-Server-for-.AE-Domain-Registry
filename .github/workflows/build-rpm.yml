@@ -82,8 +82,16 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.1-build${{ github.run_number }}
-          name: EPP Server v1.0.1 (Build ${{ github.run_number }})
+          tag_name: v1.0.3-build${{ github.run_number }}
+          name: EPP Server v1.0.3 (Build ${{ github.run_number }})
           files: ./rpm/**/*.rpm
           draft: false
           prerelease: false
+          body: |
+            ## Changes in v1.0.3
+            - Fix ARI database schema compatibility - 100% test pass rate
+            - Fix OBJ_TYPE/OBJ_STATUS values for CHECK constraints
+            - Fix domain create circular FK ordering
+            - Fix extension repository column names
+            - Add TRANSACTIONS cleanup on contact delete
+            - Enhanced test suite with standalone contact delete test
