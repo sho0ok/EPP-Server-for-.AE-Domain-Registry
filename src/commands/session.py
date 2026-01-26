@@ -172,7 +172,7 @@ class LoginHandler(BaseCommandHandler):
         from src.database.repositories.account_repo import get_account_repo
 
         account_repo = await get_account_repo()
-        await account_repo.change_password(session.user_id, new_password)
+        await account_repo.change_password(session.user_id, session.username, new_password)
 
 
 class LogoutHandler(BaseCommandHandler):

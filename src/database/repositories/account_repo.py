@@ -130,7 +130,7 @@ class AccountRepository:
                    USR_ACCOUNT_ID, USR_STATUS, USR_FAILED_LOGIN_ATTEMPTS,
                    USR_LAST_LOGON_DATE
             FROM USERS
-            WHERE USR_USERNAME = :username
+            WHERE UPPER(USR_USERNAME) = UPPER(:username)
               AND USR_TYPE = 'EPP'
         """
         params = {"username": username}
@@ -140,6 +140,34 @@ class AccountRepository:
             params["account_id"] = account_id
 
         return await self.pool.query_one(sql, params)
+
+    async def get_epp_user_by_client_id(
+        self,
+        client_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get EPP user by account's client ID (ACC_CLIENT_ID).
+
+        This is the correct lookup for EPP login - the clID in EPP maps to
+        ACC_CLIENT_ID in the ACCOUNTS table, not USR_USERNAME in USERS.
+
+        Args:
+            client_id: EPP client ID (clID) which matches ACC_CLIENT_ID
+
+        Returns:
+            User data with account info, or None
+        """
+        sql = """
+            SELECT u.USR_ID, u.USR_USERNAME, u.USR_PASSWORD, u.USR_TYPE,
+                   u.USR_ACCOUNT_ID, u.USR_STATUS, u.USR_FAILED_LOGIN_ATTEMPTS,
+                   u.USR_LAST_LOGON_DATE,
+                   a.ACC_ID, a.ACC_CLIENT_ID, a.ACC_NAME, a.ACC_STATUS AS ACC_STATUS
+            FROM USERS u
+            JOIN ACCOUNTS a ON u.USR_ACCOUNT_ID = a.ACC_ID
+            WHERE a.ACC_CLIENT_ID = :client_id
+              AND u.USR_TYPE = 'EPP'
+        """
+        return await self.pool.query_one(sql, {"client_id": client_id})
 
     async def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -162,48 +190,75 @@ class AccountRepository:
 
     async def validate_credentials(
         self,
-        username: str,
+        client_id: str,
         password: str
     ) -> Optional[Dict[str, Any]]:
         """
-        Validate user credentials.
+        Validate EPP user credentials.
+
+        Tries to find user by:
+        1. USR_USERNAME (case-insensitive) - most common case
+        2. ACC_CLIENT_ID in ACCOUNTS table - fallback
 
         Args:
-            username: EPP username
+            client_id: EPP client ID (clID) - usually the username
             password: Plain text password
 
         Returns:
             User data if valid, None otherwise
         """
-        user = await self.get_user_by_username(username)
+        # First try: direct username lookup (case-insensitive)
+        user = await self.get_user_by_username(client_id)
         if not user:
-            logger.debug(f"User not found: {username}")
-            return None
+            # Fallback: try lookup by account's client ID
+            user = await self.get_epp_user_by_client_id(client_id)
+            if not user:
+                logger.warning(f"No EPP user found for client_id: {client_id}")
+                return None
 
         # Check user status
         if user["USR_STATUS"] != "Active":
-            logger.warning(f"User not active: {username} (status={user['USR_STATUS']})")
+            logger.warning(f"User not active: {user['USR_USERNAME']} (status={user['USR_STATUS']})")
             return None
 
-        # Verify password
+        # Check account status (from joined query or separate lookup)
+        acc_status = user.get("ACC_STATUS")
+        if not acc_status:
+            account = await self.get_account_by_id(user["USR_ACCOUNT_ID"])
+            if not account:
+                logger.warning(f"Account not found for user: {user['USR_USERNAME']}")
+                return None
+            acc_status = account["ACC_STATUS"]
+            user["account"] = account
+        else:
+            # Build account dict from joined query results
+            user["account"] = {
+                "ACC_ID": user.get("ACC_ID"),
+                "ACC_CLIENT_ID": user.get("ACC_CLIENT_ID"),
+                "ACC_NAME": user.get("ACC_NAME"),
+                "ACC_STATUS": acc_status,
+            }
+
+        if acc_status != "Active":
+            logger.warning(f"Account not active for user: {user['USR_USERNAME']}")
+            return None
+
+        # Verify password - ARI uses MD5(username + '/' + password)
+        username = user["USR_USERNAME"]
         stored_hash = user["USR_PASSWORD"]
-        if not self._verify_password(password, stored_hash):
-            logger.debug(f"Invalid password for user: {username}")
-            await self.increment_failed_logins(user["USR_ID"])
-            return None
+        computed_hash = self._hash_password(username, password)
+        logger.debug(f"Auth check - User: {username}, Client ID: {client_id}")
+        logger.debug(f"Stored hash: {stored_hash}, Computed hash: {computed_hash}")
 
-        # Check account status
-        account = await self.get_account_by_id(user["USR_ACCOUNT_ID"])
-        if not account or account["ACC_STATUS"] != "Active":
-            logger.warning(f"Account not active for user: {username}")
+        if not self._verify_password(username, password, stored_hash):
+            logger.warning(f"Invalid password for user: {username} (client_id: {client_id})")
+            await self.increment_failed_logins(user["USR_ID"])
             return None
 
         # Success - reset failed logins and update last logon
         await self.reset_failed_logins(user["USR_ID"])
         await self.update_last_logon(user["USR_ID"])
 
-        # Add account info to response
-        user["account"] = account
         return user
 
     async def increment_failed_logins(self, user_id: int) -> int:
@@ -246,6 +301,7 @@ class AccountRepository:
     async def change_password(
         self,
         user_id: int,
+        username: str,
         new_password: str
     ) -> None:
         """
@@ -253,9 +309,10 @@ class AccountRepository:
 
         Args:
             user_id: User ID
+            username: Username (needed for hash)
             new_password: New plain text password
         """
-        hashed = self._hash_password(new_password)
+        hashed = self._hash_password(username, new_password)
         await self.pool.execute(
             "UPDATE USERS SET USR_PASSWORD = :password WHERE USR_ID = :user_id",
             {"user_id": user_id, "password": hashed}
@@ -528,38 +585,39 @@ class AccountRepository:
     # Password Utilities
     # ========================================================================
 
-    def _hash_password(self, password: str) -> str:
+    def _hash_password(self, username: str, password: str) -> str:
         """
         Hash a password for storage.
 
-        Uses SHA256 for compatibility with existing ARI schema.
-        In production, consider using bcrypt or argon2.
+        Uses ARI's algorithm: MD5(username + '/' + password)
 
         Args:
+            username: Username
             password: Plain text password
 
         Returns:
-            Hashed password
+            Hashed password (32 char hex string)
         """
-        # Simple SHA256 hash - matches typical ARI implementation
-        # Note: For new implementations, use bcrypt
-        return hashlib.sha256(password.encode()).hexdigest()
+        # ARI algorithm: MD5(username || '/' || password)
+        return hashlib.md5((username + '/' + password).encode()).hexdigest()
 
-    def _verify_password(self, password: str, stored_hash: str) -> bool:
+    def _verify_password(self, username: str, password: str, stored_hash: str) -> bool:
         """
         Verify a password against stored hash.
 
         Uses timing-safe comparison to prevent timing attacks.
+        Compares in uppercase for compatibility with ARI database.
 
         Args:
+            username: Username
             password: Plain text password
             stored_hash: Stored hash to compare against
 
         Returns:
             True if password matches
         """
-        computed_hash = self._hash_password(password)
-        return hmac.compare_digest(computed_hash, stored_hash)
+        computed_hash = self._hash_password(username, password).upper()
+        return hmac.compare_digest(computed_hash, stored_hash.upper())
 
 
 # Global repository instance
