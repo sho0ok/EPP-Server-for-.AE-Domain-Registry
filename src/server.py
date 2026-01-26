@@ -91,24 +91,26 @@ class EPPClientHandler:
         """Extract client IP and certificate info from transport."""
         from datetime import datetime
 
-        transport = self.writer.get_extra_info("transport")
         server_ip = "0.0.0.0"
         server_port = self.config.get("server", {}).get("port", 700)
 
-        if transport:
-            peername = transport.get_extra_info("peername")
-            if peername:
-                self.client_ip = peername[0]
-                self.client_port = peername[1]
+        # For SSL connections, get peername directly from writer
+        # This works for both plain and SSL sockets
+        peername = self.writer.get_extra_info("peername")
+        if peername:
+            self.client_ip = peername[0]
+            self.client_port = peername[1]
+            logger.debug(f"Got peername from writer: {peername}")
 
-            sockname = transport.get_extra_info("sockname")
-            if sockname:
-                server_ip = sockname[0]
-                server_port = sockname[1]
+        sockname = self.writer.get_extra_info("sockname")
+        if sockname:
+            server_ip = sockname[0]
+            server_port = sockname[1]
 
-            ssl_object = transport.get_extra_info("ssl_object")
-            if ssl_object:
-                self.client_cert = TLSHandler.extract_client_cert_info(ssl_object)
+        # Get SSL object for client certificate
+        ssl_object = self.writer.get_extra_info("ssl_object")
+        if ssl_object:
+            self.client_cert = TLSHandler.extract_client_cert_info(ssl_object)
 
         # Create SessionInfo for command handlers
         self.session = SessionInfo(
