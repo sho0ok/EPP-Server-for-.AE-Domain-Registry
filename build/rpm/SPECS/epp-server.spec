@@ -1,5 +1,5 @@
 Name:           epp-server
-Version:        1.0.2
+Version:        1.0.3
 Release:        1%{?dist}
 Summary:        EPP Server for .AE Domain Registry
 License:        MIT
@@ -100,6 +100,14 @@ fi
 systemctl daemon-reload
 
 %changelog
+* Mon Jan 27 2025 AE Registry <support@aeda.ae> - 1.0.3-1
+- Fix ARI database schema compatibility - 100% test pass rate
+- Fix OBJ_TYPE/OBJ_STATUS values for CHECK constraints
+- Fix domain create circular FK ordering
+- Fix extension repository column names
+- Add TRANSACTIONS cleanup on contact delete
+- Enhanced test suite with standalone contact delete test
+
 * Sun Jan 26 2025 AE Registry <support@aeda.ae> - 1.0.1-1
 - Fix EPP authentication to use correct ARI password hash algorithm
 - Changed from SHA256 to MD5(username + '/' + password)
