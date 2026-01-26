@@ -331,6 +331,9 @@ class AccountRepository:
         """
         Check if IP address is whitelisted for account.
 
+        Handles both IPv4 and IPv6-mapped IPv4 formats (::ffff:x.x.x.x)
+        since the portal stores IPs in IPv6-mapped format.
+
         Args:
             account_id: Account ID
             ip_address: Client IP address to check
@@ -338,28 +341,31 @@ class AccountRepository:
         Returns:
             True if IP is allowed
         """
-        # First, debug: show all IPs for this account
-        debug_sql = """
-            SELECT AEA_IP_ADDRESS, AEA_ACTIVE_DATE
-            FROM ACCOUNT_EPP_ADDRESSES
-            WHERE AEA_ACC_ID = :account_id
-        """
-        debug_rows = await self.pool.query(debug_sql, {"account_id": account_id})
-        logger.info(f"Whitelisted IPs for account {account_id}: {debug_rows}")
+        # Build list of IP formats to check
+        # Portal stores as ::ffff:x.x.x.x (IPv6-mapped IPv4)
+        ip_variants = [ip_address]
+
+        # If it's a plain IPv4, also check IPv6-mapped format
+        if '.' in ip_address and ':' not in ip_address:
+            ip_variants.append(f"::ffff:{ip_address}")
+        # If it's IPv6-mapped, also check plain IPv4
+        elif ip_address.startswith("::ffff:"):
+            ip_variants.append(ip_address.replace("::ffff:", ""))
 
         sql = """
             SELECT COUNT(*) FROM ACCOUNT_EPP_ADDRESSES
             WHERE AEA_ACC_ID = :account_id
-              AND AEA_IP_ADDRESS = :ip_address
+              AND AEA_IP_ADDRESS IN (:ip1, :ip2)
               AND AEA_ACTIVE_DATE <= :today
         """
 
         today = date.today()
-        logger.debug(f"Checking IP whitelist: account={account_id}, ip={ip_address}, today={today}")
+        logger.debug(f"Checking IP whitelist: account={account_id}, ip={ip_address}, variants={ip_variants}")
 
         count = await self.pool.query_value(sql, {
             "account_id": account_id,
-            "ip_address": ip_address,
+            "ip1": ip_variants[0],
+            "ip2": ip_variants[1] if len(ip_variants) > 1 else ip_variants[0],
             "today": today
         })
 
