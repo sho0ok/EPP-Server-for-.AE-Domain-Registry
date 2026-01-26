@@ -245,9 +245,18 @@ class BaseCommandHandler(ABC):
             if trn_id and session.authenticated:
                 try:
                     session_mgr = get_session_manager()
+                    # Set response message based on code
+                    if response_code == 1000:
+                        response_message = "Command completed successfully"
+                    elif response_code == 1001:
+                        response_message = "Command completed successfully; action pending"
+                    else:
+                        response_message = f"Error {response_code}"
+
                     await session_mgr.complete_command(
                         trn_id=trn_id,
                         response_code=response_code,
+                        response_message=response_message,
                         start_time=start_time
                     )
                 except Exception as e:
@@ -422,9 +431,18 @@ class ObjectCommandHandler(BaseCommandHandler):
             if trn_id and session.authenticated:
                 try:
                     session_mgr = get_session_manager()
+                    # Set response message based on code
+                    if response_code == 1000:
+                        response_message = "Command completed successfully"
+                    elif response_code == 1001:
+                        response_message = "Command completed successfully; action pending"
+                    else:
+                        response_message = f"Error {response_code}"
+
                     await session_mgr.complete_command(
                         trn_id=trn_id,
                         response_code=response_code,
+                        response_message=response_message,
                         start_time=start_time
                     )
                 except Exception as e:
