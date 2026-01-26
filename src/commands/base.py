@@ -21,6 +21,56 @@ from src.utils.response_builder import get_response_builder, ResponseBuilder
 logger = logging.getLogger("epp.commands")
 
 
+# Mapping from EPP command format to ARI database command names
+# EPP uses "object:action" but ARI uses "Object Action" (title case with space)
+EPP_TO_ARI_COMMAND = {
+    "domain:check": "Domain Check",
+    "domain:info": "Domain View",
+    "domain:create": "Domain Create",
+    "domain:delete": "Domain Delete",
+    "domain:update": "Domain Update",
+    "domain:renew": "Domain Renew",
+    "domain:transfer": "Domain Transfer",
+    "contact:check": "Contact Check",
+    "contact:info": "Contact View",
+    "contact:create": "Contact Create",
+    "contact:delete": "Contact Delete",
+    "contact:update": "Contact Update",
+    "contact:transfer": "Contact Transfer",
+    "host:check": "Host Check",
+    "host:info": "Host View",
+    "host:create": "Host Create",
+    "host:delete": "Host Delete",
+    "host:update": "Host Update",
+    "session:login": "Login",
+    "session:logout": "Logout",
+    "poll:request": "Message Request",
+    "poll:ack": "Message Acknowledge",
+}
+
+
+def get_ari_command_name(epp_command: str) -> str:
+    """
+    Convert EPP command format to ARI database command name.
+
+    Args:
+        epp_command: EPP format like "domain:check"
+
+    Returns:
+        ARI format like "Domain Check"
+    """
+    # Check explicit mapping first
+    if epp_command in EPP_TO_ARI_COMMAND:
+        return EPP_TO_ARI_COMMAND[epp_command]
+
+    # Fallback: convert "object:action" to "Object Action"
+    parts = epp_command.split(":")
+    if len(parts) == 2:
+        return f"{parts[0].title()} {parts[1].title()}"
+
+    return epp_command.title()
+
+
 class CommandError(Exception):
     """Base exception for command errors."""
 
@@ -327,9 +377,13 @@ class ObjectCommandHandler(BaseCommandHandler):
             # Try to get ROID from command data
             roid = await self.get_roid_from_command(command, session)
 
+            # Convert EPP command format to ARI database format
+            epp_cmd = f"{self.object_type}:{self.command_name}"
+            ari_cmd = get_ari_command_name(epp_cmd)
+
             trn_id = await session_mgr.log_command(
                 session=session,
-                command=f"{self.object_type}:{self.command_name}",
+                command=ari_cmd,
                 client_ref=cl_trid,
                 roid=roid
             )
