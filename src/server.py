@@ -263,6 +263,8 @@ class EPPClientHandler:
 
     async def _handle_login(self, command: EPPCommand) -> bytes:
         """Handle login command."""
+        from src.core.session_manager import get_session_manager
+
         cl_trid = command.client_transaction_id
         data = command.data
 
@@ -277,6 +279,10 @@ class EPPClientHandler:
         # Extract credentials
         client_id = data.get("clID")
         password = data.get("pw")
+        version = data.get("version", "1.0")
+        lang = data.get("lang", "en")
+        object_uris = data.get("objURIs", [])
+        extension_uris = data.get("extURIs", [])
 
         if not client_id or not password:
             return self.response_builder.build_error(
@@ -288,46 +294,35 @@ class EPPClientHandler:
         logger.info(f"Login attempt: {client_id} from {self.client_ip}")
 
         try:
-            # Authenticate against database
-            account_repo = await get_account_repo()
-            user = await account_repo.validate_credentials(client_id, password)
+            # Use session manager to authenticate (creates CONNECTION and SESSION records)
+            session_mgr = get_session_manager()
+            result = await session_mgr.authenticate(
+                session=self.session,
+                username=client_id,
+                password=password,
+                version=version,
+                language=lang,
+                object_uris=object_uris,
+                extension_uris=extension_uris
+            )
 
-            if user is None:
-                logger.warning(f"Authentication failed for {client_id} from {self.client_ip}")
+            if not result["success"]:
+                logger.warning(f"Authentication failed for {client_id} from {self.client_ip}: {result['message']}")
                 return self.response_builder.build_error(
-                    code=2200,
-                    message="Authentication error: invalid credentials",
+                    code=result["code"],
+                    message=result["message"],
                     cl_trid=cl_trid
                 )
 
-            # Check IP whitelist
-            ip_allowed = await account_repo.check_ip_whitelist(user["USR_ACCOUNT_ID"], self.client_ip)
-            if not ip_allowed:
-                logger.warning(f"IP {self.client_ip} not whitelisted for account {user['USR_ACCOUNT_ID']}")
-                return self.response_builder.build_error(
-                    code=2200,
-                    message="Authentication error: IP address not authorized",
-                    cl_trid=cl_trid
-                )
-
-            # Authentication successful
-            from datetime import datetime
-
+            # Authentication successful - update local state
             self.authenticated = True
-            self.client_id = client_id
-            self.account_id = user["USR_ACCOUNT_ID"]
-            self.user_id = user["USR_ID"]
+            self.client_id = self.session.client_id
+            self.account_id = self.session.account_id
+            self.user_id = self.session.user_id
+            self.session_id = self.session.session_id
+            self.connection_id = self.session.connection_id
 
-            # Update session info for command handlers
-            if self.session:
-                self.session.authenticated = True
-                self.session.client_id = client_id
-                self.session.account_id = user["USR_ACCOUNT_ID"]
-                self.session.user_id = user["USR_ID"]
-                self.session.username = user["USR_USERNAME"]
-                self.session.login_time = datetime.utcnow()
-
-            logger.info(f"Login successful: {client_id} (account {user['USR_ACCOUNT_ID']}) from {self.client_ip}")
+            logger.info(f"Login successful: {client_id} (account {self.account_id}) from {self.client_ip}")
 
             return self.response_builder.build_response(
                 code=1000,
