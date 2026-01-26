@@ -594,9 +594,11 @@ class AccountRepository:
         """
         max_conn = await self.get_max_connections(account_id)
         if max_conn is None:
+            logger.info(f"Account {account_id}: No connection limit set")
             return True  # No limit
 
         current = await self.get_active_connection_count(account_id)
+        logger.info(f"Account {account_id}: {current} open connections, max allowed: {max_conn}")
         return current < max_conn
 
     # ========================================================================

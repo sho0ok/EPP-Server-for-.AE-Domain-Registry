@@ -550,11 +550,22 @@ class EPPServer:
         # Initialize session manager
         server_config = self.config.get("server", {})
         epp_config = self.config.get("epp", {})
+        server_name = epp_config.get("server_id", "epp.aeda.ae")
+
         initialize_session_manager(
-            server_name=epp_config.get("server_id", "epp.aeda.ae"),
+            server_name=server_name,
             server_port=server_config.get("port", 700)
         )
         logger.info("Session manager initialized")
+
+        # Cleanup stale connections from previous server runs
+        try:
+            from src.database.repositories.transaction_repo import get_transaction_repo
+            trn_repo = await get_transaction_repo()
+            await trn_repo.cleanup_stale_connections(server_name)
+            logger.info("Stale connections cleaned up")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup stale connections: {e}")
 
     async def handle_client(
         self,

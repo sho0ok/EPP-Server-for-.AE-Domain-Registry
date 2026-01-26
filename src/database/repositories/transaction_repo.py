@@ -230,7 +230,7 @@ class TransactionRepository:
             conn_id=conn_id,
             end_time=datetime.utcnow(),
             end_reason=reason,
-            status="CLOSED"
+            status="CLOSE"
         )
 
     async def increment_login_failures(self, conn_id: int) -> int:
@@ -378,7 +378,7 @@ class TransactionRepository:
             session_id=session_id,
             end_time=datetime.utcnow(),
             end_reason=reason,
-            status="CLOSED"
+            status="CLOSE"
         )
 
     async def touch_session(self, session_id: int) -> None:
@@ -571,6 +571,46 @@ class TransactionRepository:
         })
 
         return trn_id
+
+    async def cleanup_stale_connections(self, server_name: str) -> int:
+        """
+        Close all stale OPEN connections on startup.
+
+        This handles the case where the server crashed without properly
+        closing connections, leaving orphaned OPEN records in the database.
+
+        Args:
+            server_name: Server name (for logging)
+
+        Returns:
+            Number of connections cleaned up
+        """
+        # Close ALL open connections - they're stale since we just started
+        # Note: CNN_STATUS is VARCHAR2(5), so use 'CLOSE' not 'CLOSE'
+        sql = """
+            UPDATE CONNECTIONS
+            SET CNN_STATUS = 'CLOSE',
+                CNN_END_TIME = :end_time
+            WHERE CNN_STATUS = 'OPEN'
+        """
+        result = await self.pool.execute(sql, {
+            "end_time": datetime.utcnow()
+        })
+
+        # Also close all orphaned sessions
+        # Note: SES_STATUS is VARCHAR2(5), so use 'CLOSE' not 'CLOSE'
+        sql_sessions = """
+            UPDATE SESSIONS
+            SET SES_STATUS = 'CLOSE',
+                SES_END_TIME = :end_time
+            WHERE SES_STATUS = 'OPEN'
+        """
+        await self.pool.execute(sql_sessions, {
+            "end_time": datetime.utcnow()
+        })
+
+        logger.info(f"Cleaned up all stale OPEN connections on server startup")
+        return result if result else 0
 
 
 # Global repository instance
