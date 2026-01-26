@@ -15,6 +15,88 @@ from src.database.connection import get_pool, DatabasePool
 logger = logging.getLogger("epp.database.transaction")
 
 
+# Mapping from EPP response codes to ARI internal response codes
+# The TRANSACTIONS.TRN_RESPONSE_CODE column references RESPONSE_CODES.RCO_CODE
+# which contains ARI internal codes, not EPP codes.
+# The portal uses these ARI codes to determine success/failure.
+# ARI codes 100-104 are SUCCESS codes, codes >= 105 are ERROR codes.
+#
+# These mappings are based on the pop_response_codes.sql population script.
+EPP_TO_ARI_RESPONSE_CODE = {
+    # Success codes (100-104 range indicates success in ARI)
+    1000: 100,   # ok - Command completed successfully
+    1001: 101,   # successful_pending - Command completed successfully; action pending
+    1300: 103,   # successful_no_messages - No messages
+    1301: 102,   # successful_messages - Messages available
+    1500: 100,   # Command completed successfully; ending session (mapped to ok)
+
+    # Protocol Syntax Errors (2000-2099) - ARI uses 209 for invalid_command
+    2000: 209,   # invalid_command - Unknown command
+    2001: 209,   # Command syntax error (mapped to invalid_command)
+    2002: 20,    # operation_not_supported_in_zone / Command use error
+    2003: 206,   # missing_extensions - Required parameter missing
+    2004: 30,    # field_value_too_long - Parameter value range error
+    2005: 30,    # field_value_too_long - Parameter value syntax error
+
+    # Implementation-specific Rules Errors (2100-2199)
+    2100: 202,   # unimplemented_protocol
+    2101: 203,   # unimplemented_command
+    2102: 204,   # unimplemented_option
+    2103: 205,   # unimplemented_extension
+    2104: 216,   # billing_error
+    2105: 216,   # Object is not eligible for renewal (billing related)
+    2106: 216,   # Object is not eligible for transfer (billing related)
+
+    # Security Errors (2200-2299)
+    2200: 208,   # invalid_authorisation - Authentication error
+    2201: 221,   # authorized_registry - Authorization error
+    2202: 208,   # invalid_authorisation - Invalid authorization information
+
+    # Data Management Errors (2300-2399)
+    2300: 213,   # object_pending_transfer
+    2301: 214,   # object_not_pending_transfer
+    2302: 210,   # object_does_not_exist (for "Object exists" we use a generic error)
+    2303: 210,   # object_does_not_exist
+    2304: 212,   # status_prohibits_operation
+    2305: 212,   # status_prohibits_operation (Object association prohibits operation)
+    2306: 30,    # field_value_too_long - Parameter value policy error
+    2307: 203,   # unimplemented_command - Unimplemented object service
+    2308: 218,   # object_locked - Data management policy violation
+
+    # Server Errors (2400-2599)
+    2400: 215,   # unknown_error - Command failed
+    2500: 300,   # connection_exists - Command failed; server closing connection
+    2501: 208,   # invalid_authorisation - Authentication error; server closing connection
+    2502: 301,   # connection_limit_exceeded - Session limit exceeded
+}
+
+
+def epp_to_ari_response_code(epp_code: int) -> int:
+    """
+    Convert EPP response code to ARI internal response code.
+
+    The ARI database RESPONSE_CODES table uses internal codes (100, 200, etc.)
+    that map to EPP codes. The portal determines success based on these internal codes.
+    ARI codes 100-104 indicate success; all other codes indicate failure.
+
+    Args:
+        epp_code: EPP response code (1000, 2000, etc.)
+
+    Returns:
+        ARI internal response code (100 for success, 200+ for errors)
+    """
+    if epp_code in EPP_TO_ARI_RESPONSE_CODE:
+        return EPP_TO_ARI_RESPONSE_CODE[epp_code]
+
+    # Fallback: map success vs error based on EPP code range
+    if 1000 <= epp_code < 2000:
+        return 100  # Map unknown success to 'ok'
+
+    # For unknown error codes, use 215 (unknown_error) which maps to EPP 2400
+    logger.warning(f"Unknown EPP response code: {epp_code}, mapping to ARI 215 (unknown_error)")
+    return 215  # unknown_error
+
+
 class TransactionRepository:
     """
     Repository for connection, session, and transaction logging.
@@ -384,13 +466,17 @@ class TransactionRepository:
 
         Args:
             trn_id: Transaction ID
-            response_code: EPP response code
+            response_code: EPP response code (will be converted to ARI internal code)
             response_message: Response message
             amount: Transaction amount (if billing)
             balance: Account balance after transaction
             audit_log: Audit details
             application_time: Processing time in milliseconds
         """
+        # Convert EPP response code to ARI internal code
+        # The RESPONSE_CODES table uses internal codes (100=ok, 200+=errors)
+        ari_response_code = epp_to_ari_response_code(response_code)
+
         sql = """
             UPDATE TRANSACTIONS SET
                 TRN_END_TIME = :end_time,
@@ -406,7 +492,7 @@ class TransactionRepository:
         await self.pool.execute(sql, {
             "trn_id": trn_id,
             "end_time": datetime.utcnow(),
-            "response_code": response_code,
+            "response_code": ari_response_code,
             "response_message": response_message[:4000] if response_message else None,
             "amount": amount,
             "balance": balance,
@@ -414,7 +500,7 @@ class TransactionRepository:
             "application_time": application_time
         })
 
-        logger.debug(f"Completed transaction {trn_id}: code={response_code}")
+        logger.debug(f"Completed transaction {trn_id}: EPP code={response_code} -> ARI code={ari_response_code}")
 
     async def log_complete_transaction(
         self,
@@ -437,11 +523,17 @@ class TransactionRepository:
 
         Convenience method that creates and completes a transaction record.
 
+        Args:
+            response_code: EPP response code (will be converted to ARI internal code)
+
         Returns:
             Transaction ID
         """
         trn_id = await self.pool.get_next_sequence("TRN_ID_SEQ")
         now = datetime.utcnow()
+
+        # Convert EPP response code to ARI internal code
+        ari_response_code = epp_to_ari_response_code(response_code)
 
         sql = """
             INSERT INTO TRANSACTIONS (
@@ -470,7 +562,7 @@ class TransactionRepository:
             "roid": roid,
             "start_time": now,
             "end_time": now,
-            "response_code": response_code,
+            "response_code": ari_response_code,
             "response_message": response_message[:4000] if response_message else None,
             "amount": amount,
             "balance": balance,

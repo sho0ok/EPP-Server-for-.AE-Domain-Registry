@@ -1,5 +1,5 @@
 Name:           epp-server
-Version:        1.0.1
+Version:        1.0.2
 Release:        1%{?dist}
 Summary:        EPP Server for .AE Domain Registry
 License:        MIT
