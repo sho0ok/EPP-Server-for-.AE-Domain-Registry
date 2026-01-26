@@ -23,7 +23,7 @@ import yaml
 from src.core.tls_handler import TLSHandler, ClientCertInfo
 from src.core.frame_handler import FrameHandler, FrameReadError, FrameSizeError
 from src.core.xml_processor import XMLProcessor, XMLParseError, XMLValidationError, EPPCommand
-from src.core.session_manager import SessionInfo
+from src.core.session_manager import SessionInfo, initialize_session_manager
 from src.database.connection import initialize_pool, close_pool, get_pool
 from src.database.repositories import get_account_repo
 from src.commands.domain import get_domain_handler
@@ -551,6 +551,15 @@ class EPPServer:
         except Exception as e:
             logger.warning(f"Database pool initialization failed: {e}")
             logger.warning("Server will start but database operations will fail")
+
+        # Initialize session manager
+        server_config = self.config.get("server", {})
+        epp_config = self.config.get("epp", {})
+        initialize_session_manager(
+            server_name=epp_config.get("server_id", "epp.aeda.ae"),
+            server_port=server_config.get("port", 700)
+        )
+        logger.info("Session manager initialized")
 
     async def handle_client(
         self,
