@@ -197,6 +197,8 @@ class BaseCommandHandler(ABC):
         trn_id = None
         response_code = 2400  # Default to failure
 
+        response_message = None  # Track error message for logging
+
         try:
             # Check authentication if required
             if self.requires_auth and not session.authenticated:
@@ -215,13 +217,17 @@ class BaseCommandHandler(ABC):
             # Execute the actual command
             response = await self.handle(command, session)
             response_code = 1000  # Success
+            response_message = "Command completed successfully"
 
             return response
 
         except CommandError as e:
             response_code = e.code
+            response_message = e.message
+            if e.reason:
+                response_message = f"{e.message}: {e.reason}"
             logger.warning(
-                f"Command {self.command_name} failed: [{e.code}] {e.message}"
+                f"Command {self.command_name} failed: [{e.code}] {response_message}"
             )
             return self.response_builder.build_error(
                 code=e.code,
@@ -233,6 +239,7 @@ class BaseCommandHandler(ABC):
 
         except Exception as e:
             response_code = 2400
+            response_message = f"Command failed: {str(e)}"
             logger.exception(f"Command {self.command_name} error: {e}")
             return self.response_builder.build_error(
                 code=2400,
@@ -245,14 +252,6 @@ class BaseCommandHandler(ABC):
             if trn_id and session.authenticated:
                 try:
                     session_mgr = get_session_manager()
-                    # Set response message based on code
-                    if response_code == 1000:
-                        response_message = "Command completed successfully"
-                    elif response_code == 1001:
-                        response_message = "Command completed successfully; action pending"
-                    else:
-                        response_message = f"Error {response_code}"
-
                     await session_mgr.complete_command(
                         trn_id=trn_id,
                         response_code=response_code,
@@ -375,6 +374,7 @@ class ObjectCommandHandler(BaseCommandHandler):
         start_time = datetime.utcnow()
         trn_id = None
         response_code = 2400
+        response_message = None  # Track error message for logging
         roid = None
 
         try:
@@ -399,14 +399,18 @@ class ObjectCommandHandler(BaseCommandHandler):
 
             response = await self.handle(command, session)
             response_code = 1000
+            response_message = "Command completed successfully"
 
             return response
 
         except CommandError as e:
             response_code = e.code
+            response_message = e.message
+            if e.reason:
+                response_message = f"{e.message}: {e.reason}"
             logger.warning(
                 f"Command {self.object_type}:{self.command_name} failed: "
-                f"[{e.code}] {e.message}"
+                f"[{e.code}] {response_message}"
             )
             return self.response_builder.build_error(
                 code=e.code,
@@ -418,6 +422,7 @@ class ObjectCommandHandler(BaseCommandHandler):
 
         except Exception as e:
             response_code = 2400
+            response_message = f"Command failed: {str(e)}"
             logger.exception(
                 f"Command {self.object_type}:{self.command_name} error: {e}"
             )
@@ -431,14 +436,6 @@ class ObjectCommandHandler(BaseCommandHandler):
             if trn_id and session.authenticated:
                 try:
                     session_mgr = get_session_manager()
-                    # Set response message based on code
-                    if response_code == 1000:
-                        response_message = "Command completed successfully"
-                    elif response_code == 1001:
-                        response_message = "Command completed successfully; action pending"
-                    else:
-                        response_message = f"Error {response_code}"
-
                     await session_mgr.complete_command(
                         trn_id=trn_id,
                         response_code=response_code,

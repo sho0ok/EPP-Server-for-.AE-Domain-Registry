@@ -261,11 +261,7 @@ class HostUpdateHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if host.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "host",
-                hostname,
-                "Only sponsoring registrar can update host"
-            )
+            raise AuthorizationError("Only sponsoring registrar can update host")
 
         # Parse update data
         add_data = data.get("add", {})
@@ -362,11 +358,7 @@ class HostDeleteHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if host.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "host",
-                hostname,
-                "Only sponsoring registrar can delete host"
-            )
+            raise AuthorizationError("Only sponsoring registrar can delete host")
 
         # Check if host is in use
         in_use, usage = await host_repo.is_in_use(hostname)

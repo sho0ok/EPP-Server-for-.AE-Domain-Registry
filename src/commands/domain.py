@@ -493,11 +493,7 @@ class DomainUpdateHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "domain",
-                domain_name,
-                "Only sponsoring registrar can update domain"
-            )
+            raise AuthorizationError("Only sponsoring registrar can update domain")
 
         # Parse update data
         add_data = data.get("add", {})
@@ -592,11 +588,7 @@ class DomainDeleteHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "domain",
-                domain_name,
-                "Only sponsoring registrar can delete domain"
-            )
+            raise AuthorizationError("Only sponsoring registrar can delete domain")
 
         # Perform delete (marks as pendingDelete)
         try:
@@ -615,7 +607,7 @@ class DomainDeleteHandler(ObjectCommandHandler):
         return self.success_response(
             cl_trid=cl_trid,
             code=1001,
-            msg="Command completed successfully; action pending"
+            message="Command completed successfully; action pending"
         )
 
     async def get_roid_from_command(
@@ -689,11 +681,7 @@ class DomainRenewHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "domain",
-                domain_name,
-                "Only sponsoring registrar can renew domain"
-            )
+            raise AuthorizationError("Only sponsoring registrar can renew domain")
 
         # Get period (optional, default 1 year)
         period = data.get("period", 1)
@@ -898,18 +886,14 @@ class DomainTransferHandler(ObjectCommandHandler):
             return self.success_response(
                 cl_trid=cl_trid,
                 code=1001,
-                msg="Command completed successfully; action pending",
+                message="Command completed successfully; action pending",
                 result_data=result_data
             )
 
         elif op == "approve":
             # Approve transfer - must be current sponsor
             if sponsoring_account != session.account_id:
-                raise AuthorizationError(
-                    "domain",
-                    domain_name,
-                    "Only current sponsoring registrar can approve transfer"
-                )
+                raise AuthorizationError("Only current sponsoring registrar can approve transfer")
 
             try:
                 result = await domain_repo.approve_transfer(domain_name, session.user_id)
@@ -923,11 +907,7 @@ class DomainTransferHandler(ObjectCommandHandler):
         elif op == "reject":
             # Reject transfer - must be current sponsor
             if sponsoring_account != session.account_id:
-                raise AuthorizationError(
-                    "domain",
-                    domain_name,
-                    "Only current sponsoring registrar can reject transfer"
-                )
+                raise AuthorizationError("Only current sponsoring registrar can reject transfer")
 
             try:
                 result = await domain_repo.reject_transfer(domain_name, session.user_id)

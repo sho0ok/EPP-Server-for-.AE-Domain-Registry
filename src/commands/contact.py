@@ -317,11 +317,7 @@ class ContactUpdateHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if contact.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "contact",
-                contact_id,
-                "Only sponsoring registrar can update contact"
-            )
+            raise AuthorizationError("Only sponsoring registrar can update contact")
 
         # Validate update data
         validator = get_validator()
@@ -432,11 +428,7 @@ class ContactDeleteHandler(ObjectCommandHandler):
 
         # Verify sponsoring registrar
         if contact.get("_account_id") != session.account_id:
-            raise AuthorizationError(
-                "contact",
-                contact_id,
-                "Only sponsoring registrar can delete contact"
-            )
+            raise AuthorizationError("Only sponsoring registrar can delete contact")
 
         # Check if contact is in use
         in_use, usage = await contact_repo.is_in_use(contact_id)
