@@ -18,14 +18,14 @@ Download the latest RPM from [Releases](https://github.com/sho0ok/EPP-Server-for
 ### Step 2: Copy to server
 
 ```bash
-scp epp-server-1.0.0-1.el9.x86_64.rpm user@your-server:/tmp/
+scp epp-server-1.0.1-1.el9.x86_64.rpm user@your-server:/tmp/
 ```
 
 ### Step 3: Install (no internet required)
 
 ```bash
 ssh user@your-server
-yum install /tmp/epp-server-1.0.0-1.el9.x86_64.rpm
+yum install /tmp/epp-server-1.0.1-1.el9.x86_64.rpm
 ```
 
 ### Step 4: Generate TLS Certificates

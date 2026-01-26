@@ -1,5 +1,5 @@
 Name:           epp-server
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        EPP Server for .AE Domain Registry
 License:        MIT
@@ -100,6 +100,12 @@ fi
 systemctl daemon-reload
 
 %changelog
+* Sun Jan 26 2025 AE Registry <support@aeda.ae> - 1.0.1-1
+- Fix EPP authentication to use correct ARI password hash algorithm
+- Changed from SHA256 to MD5(username + '/' + password)
+- Added case-insensitive username lookup
+- Added fallback lookup by ACC_CLIENT_ID
+
 * Mon Jan 20 2025 AE Registry <support@aeda.ae> - 1.0.0-1
 - Initial RPM release
 - Full EPP RFC 5730-5734 support
