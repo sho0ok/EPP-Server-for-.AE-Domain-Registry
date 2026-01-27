@@ -141,20 +141,80 @@ class DomainInfoHandler(ObjectCommandHandler):
 
         # Get extension data for the domain
         extension_repo = await get_extension_repo()
-        extension_data = await extension_repo.get_domain_extension_data(domain.get("roid"))
+        domain_roid = domain.get("roid")
+        extension_data = await extension_repo.get_domain_extension_data(domain_roid)
 
         # Format extension data for response
         extensions_response = None
         if extension_data:
             extensions_response = self._format_extension_data(extension_data)
 
+        # Get Phase 7-11 extension data
+        extension_elements = []
+
+        # secDNS (DNSSEC) data
+        secdns_data = await extension_repo.get_domain_secdns_data(domain_roid)
+        if secdns_data:
+            secdns_elem = self.response_builder.build_secdns_info_data(secdns_data)
+            if secdns_elem is not None:
+                extension_elements.append(secdns_elem)
+
+        # IDN data
+        idn_data = await extension_repo.get_domain_idn_data(domain_roid)
+        if idn_data:
+            idn_elem = self.response_builder.build_idn_info_data(
+                user_form=idn_data.get("USER_FORM"),
+                language=idn_data.get("LANGUAGE"),
+                canonical_form=idn_data.get("CANONICAL_FORM")
+            )
+            if idn_elem is not None:
+                extension_elements.append(idn_elem)
+
+        # Variant data
+        variant_data = await extension_repo.get_domain_variants(domain_roid)
+        if variant_data:
+            variants = [
+                {"name": v.get("VARIANT_NAME"), "userForm": v.get("USER_FORM")}
+                for v in variant_data
+            ]
+            variant_elem = self.response_builder.build_variant_info_data(variants)
+            if variant_elem is not None:
+                extension_elements.append(variant_elem)
+
+        # KV data
+        kv_data = await extension_repo.get_domain_kv_data(domain_roid)
+        if kv_data:
+            kv_elem = self.response_builder.build_kv_info_data(kv_data)
+            if kv_elem is not None:
+                extension_elements.append(kv_elem)
+
         # Build response
         result_data = self.response_builder.build_domain_info_result(domain)
+
+        # Combine old-style dict extensions with new XML element extensions
+        final_extensions = None
+        if extensions_response or extension_elements:
+            from lxml import etree
+            ext_container = etree.Element("{urn:ietf:params:xml:ns:epp-1.0}extension")
+
+            # Add old-style extensions (converted from dict)
+            if extensions_response:
+                old_ext_xml = self.response_builder.build_extensions_response(extensions_response)
+                if old_ext_xml is not None:
+                    for child in old_ext_xml:
+                        ext_container.append(child)
+
+            # Add new Phase 7-11 extension elements
+            for elem in extension_elements:
+                ext_container.append(elem)
+
+            if len(ext_container) > 0:
+                final_extensions = ext_container
 
         return self.success_response(
             cl_trid=cl_trid,
             result_data=result_data,
-            extensions=extensions_response
+            extensions=final_extensions
         )
 
     def _format_extension_data(
@@ -355,6 +415,11 @@ class DomainCreateHandler(ObjectCommandHandler):
                     extension_repo, roid, zone_id, extension_data
                 )
 
+            # Save Phase 7-11 extension data
+            await self._save_phase7_11_extensions(
+                extension_repo, roid, command.extensions
+            )
+
             # Debit account
             await account_repo.debit_balance(session.account_id, rate)
 
@@ -458,6 +523,53 @@ class DomainCreateHandler(ObjectCommandHandler):
                             value=value
                         )
 
+    async def _save_phase7_11_extensions(
+        self,
+        extension_repo,
+        domain_roid: str,
+        extensions: Dict[str, Any]
+    ):
+        """
+        Save Phase 7-11 extension data for a domain.
+
+        Args:
+            extension_repo: Extension repository
+            domain_roid: Domain ROID
+            extensions: Parsed extensions dict
+        """
+        # Phase 7: secDNS (DNSSEC)
+        if "secDNS" in extensions:
+            secdns = extensions["secDNS"]
+            if secdns.get("operation") == "create":
+                await extension_repo.save_domain_secdns_data(
+                    domain_roid=domain_roid,
+                    ds_data=secdns.get("dsData"),
+                    key_data=secdns.get("keyData"),
+                    max_sig_life=secdns.get("maxSigLife")
+                )
+
+        # Phase 8: IDN
+        if "idnadomain" in extensions:
+            idn = extensions["idnadomain"]
+            if idn.get("operation") == "create":
+                await extension_repo.save_domain_idn_data(
+                    domain_roid=domain_roid,
+                    user_form=idn.get("userForm", ""),
+                    language=idn.get("language", ""),
+                    canonical_form=idn.get("canonicalForm")
+                )
+
+        # Phase 11: KV
+        if "kv" in extensions:
+            kv = extensions["kv"]
+            if kv.get("operation") == "create":
+                kvlists = kv.get("kvlists", [])
+                if kvlists:
+                    await extension_repo.save_domain_kv_data(
+                        domain_roid=domain_roid,
+                        kvlists=kvlists
+                    )
+
 
 class DomainUpdateHandler(ObjectCommandHandler):
     """
@@ -549,6 +661,14 @@ class DomainUpdateHandler(ObjectCommandHandler):
                 add_statuses=[s for s in add_statuses if s] if add_statuses else None,
                 rem_statuses=[s for s in rem_statuses if s] if rem_statuses else None
             )
+
+            # Handle Phase 7-11 extension updates
+            domain_roid = domain.get("roid")
+            extension_repo = await get_extension_repo()
+            await self._update_phase7_11_extensions(
+                extension_repo, domain_roid, command.extensions
+            )
+
         except Exception as e:
             logger.error(f"Failed to update domain {domain_name}: {e}")
             raise CommandError(
@@ -560,6 +680,87 @@ class DomainUpdateHandler(ObjectCommandHandler):
         logger.info(f"Updated domain: {domain_name}")
 
         return self.success_response(cl_trid=cl_trid)
+
+    async def _update_phase7_11_extensions(
+        self,
+        extension_repo,
+        domain_roid: str,
+        extensions: Dict[str, Any]
+    ):
+        """
+        Update Phase 7-11 extension data for a domain.
+
+        Args:
+            extension_repo: Extension repository
+            domain_roid: Domain ROID
+            extensions: Parsed extensions dict
+        """
+        # Phase 7: secDNS update
+        if "secDNS" in extensions:
+            secdns = extensions["secDNS"]
+            op = secdns.get("operation", "update")
+
+            if op == "update":
+                # Handle add
+                add_data = secdns.get("add", {})
+                if add_data:
+                    await extension_repo.save_domain_secdns_data(
+                        domain_roid=domain_roid,
+                        ds_data=add_data.get("dsData"),
+                        key_data=add_data.get("keyData")
+                    )
+
+                # Handle rem
+                rem_data = secdns.get("rem", {})
+                if rem_data:
+                    await extension_repo.delete_domain_secdns_data(
+                        domain_roid=domain_roid,
+                        ds_data=rem_data.get("dsData"),
+                        key_data=rem_data.get("keyData"),
+                        remove_all=rem_data.get("all", False)
+                    )
+
+                # Handle chg (maxSigLife)
+                chg_data = secdns.get("chg", {})
+                if chg_data.get("maxSigLife"):
+                    await extension_repo.save_domain_secdns_data(
+                        domain_roid=domain_roid,
+                        max_sig_life=chg_data["maxSigLife"]
+                    )
+
+        # Phase 9: Variant update
+        if "variant" in extensions:
+            variant = extensions["variant"]
+            op = variant.get("operation", "update")
+
+            if op == "update":
+                # Handle add
+                add_variants = variant.get("add", [])
+                if add_variants:
+                    await extension_repo.add_domain_variants(domain_roid, add_variants)
+
+                # Handle rem
+                rem_variants = variant.get("rem", [])
+                if rem_variants:
+                    await extension_repo.remove_domain_variants(domain_roid, rem_variants)
+
+        # Phase 10: Sync update (expiry date sync)
+        if "sync" in extensions:
+            sync = extensions["sync"]
+            # The sync extension updates expiry date - this would be handled
+            # separately by the domain_repo, but we capture the parsed data here
+            pass  # Expiry date update handled via domain_repo
+
+        # Phase 11: KV update
+        if "kv" in extensions:
+            kv = extensions["kv"]
+            if kv.get("operation") == "update":
+                kvlists = kv.get("kvlists", [])
+                if kvlists:
+                    await extension_repo.save_domain_kv_data(
+                        domain_roid=domain_roid,
+                        kvlists=kvlists
+                    )
 
 
 class DomainDeleteHandler(ObjectCommandHandler):

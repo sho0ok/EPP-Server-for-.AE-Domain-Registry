@@ -482,6 +482,274 @@ class ContactDeleteHandler(ObjectCommandHandler):
         return None
 
 
+class ContactTransferHandler(ObjectCommandHandler):
+    """
+    Handle contact:transfer command.
+
+    Handles all transfer operations per RFC 5733:
+    - request: Request transfer to new registrar
+    - approve: Approve incoming transfer (current sponsor)
+    - reject: Reject incoming transfer (current sponsor)
+    - cancel: Cancel outgoing transfer (requesting registrar)
+    - query: Query transfer status
+    """
+
+    command_name = "transfer"
+    object_type = "contact"
+
+    async def handle(
+        self,
+        command: EPPCommand,
+        session: SessionInfo
+    ) -> bytes:
+        """Process contact:transfer command."""
+        cl_trid = command.client_transaction_id
+        data = command.data
+
+        contact_id = data.get("id")
+        if not contact_id:
+            raise CommandError(
+                2003,
+                "Required parameter missing",
+                reason="Contact ID required"
+            )
+
+        # Get operation type (request, approve, reject, cancel, query)
+        op = data.get("op", "request")
+        if op not in ("request", "approve", "reject", "cancel", "query"):
+            raise CommandError(
+                2005,
+                "Parameter value syntax error",
+                reason=f"Invalid transfer operation: {op}"
+            )
+
+        contact_repo = await get_contact_repo()
+        contact = await contact_repo.get_by_uid(contact_id)
+
+        if not contact:
+            raise ObjectNotFoundError("contact", contact_id)
+
+        sponsoring_account = contact.get("_account_id")
+
+        if op == "query":
+            # Query transfer status - any registrar can query
+            transfer = await contact_repo.query_transfer(contact_id)
+            if not transfer:
+                raise CommandError(
+                    2301,
+                    "Object not pending transfer",
+                    reason="No pending transfer for contact"
+                )
+
+            result_data = self.response_builder.build_contact_transfer_result(
+                contact_id=contact_id,
+                tr_status=transfer["trStatus"],
+                re_id=transfer["reID"],
+                re_date=transfer["reDate"],
+                ac_id=transfer["acID"],
+                ac_date=transfer["acDate"]
+            )
+
+            return self.success_response(
+                cl_trid=cl_trid,
+                result_data=result_data
+            )
+
+        elif op == "request":
+            # Request transfer - must NOT be current sponsor
+            auth_info = data.get("authInfo")
+            if not auth_info:
+                raise CommandError(
+                    2003,
+                    "Required parameter missing",
+                    reason="Auth info required for transfer request"
+                )
+
+            # Cannot transfer own contact
+            if sponsoring_account == session.account_id:
+                raise CommandError(
+                    2306,
+                    "Parameter value policy error",
+                    reason="Cannot transfer contact you already sponsor"
+                )
+
+            try:
+                result = await contact_repo.request_transfer(
+                    contact_id=contact_id,
+                    requesting_account_id=session.account_id,
+                    user_id=session.user_id,
+                    auth_info=auth_info
+                )
+            except ValueError as e:
+                error_msg = str(e)
+                if "Invalid authorization" in error_msg:
+                    raise CommandError(2202, "Invalid authorization information")
+                elif "pending transfer" in error_msg:
+                    raise CommandError(2300, "Object pending transfer")
+                elif "prohibited" in error_msg:
+                    raise CommandError(
+                        2304,
+                        "Object status prohibits operation",
+                        reason=error_msg
+                    )
+                else:
+                    raise CommandError(2400, "Command failed", reason=error_msg)
+            except Exception as e:
+                logger.error(f"Failed to request transfer for {contact_id}: {e}")
+                raise CommandError(2400, "Command failed", reason=str(e))
+
+            result_data = self.response_builder.build_contact_transfer_result(
+                contact_id=contact_id,
+                tr_status="pending",
+                re_id=result["reID"],
+                re_date=result["reDate"],
+                ac_id=result["acID"],
+                ac_date=result["acDate"]
+            )
+
+            logger.info(f"Transfer requested for contact: {contact_id}")
+
+            return self.success_response(
+                cl_trid=cl_trid,
+                code=1001,
+                message="Command completed successfully; action pending",
+                result_data=result_data
+            )
+
+        elif op == "approve":
+            # Approve transfer - must be current sponsor
+            if sponsoring_account != session.account_id:
+                raise AuthorizationError(
+                    "Only current sponsoring registrar can approve transfer"
+                )
+
+            try:
+                result = await contact_repo.approve_transfer(
+                    contact_id=contact_id,
+                    user_id=session.user_id
+                )
+            except ValueError as e:
+                if "No pending transfer" in str(e):
+                    raise CommandError(
+                        2301,
+                        "Object not pending transfer",
+                        reason="No pending transfer for contact"
+                    )
+                raise CommandError(2400, "Command failed", reason=str(e))
+            except Exception as e:
+                logger.error(f"Failed to approve transfer for {contact_id}: {e}")
+                raise CommandError(2400, "Command failed", reason=str(e))
+
+            result_data = self.response_builder.build_contact_transfer_result(
+                contact_id=contact_id,
+                tr_status=result["trStatus"],
+                re_id=result["reID"],
+                re_date=result["reDate"],
+                ac_id=result["acID"],
+                ac_date=result["acDate"]
+            )
+
+            logger.info(f"Transfer approved for contact: {contact_id}")
+
+            return self.success_response(
+                cl_trid=cl_trid,
+                result_data=result_data
+            )
+
+        elif op == "reject":
+            # Reject transfer - must be current sponsor
+            if sponsoring_account != session.account_id:
+                raise AuthorizationError(
+                    "Only current sponsoring registrar can reject transfer"
+                )
+
+            try:
+                result = await contact_repo.reject_transfer(
+                    contact_id=contact_id,
+                    user_id=session.user_id
+                )
+            except ValueError as e:
+                if "No pending transfer" in str(e):
+                    raise CommandError(
+                        2301,
+                        "Object not pending transfer",
+                        reason="No pending transfer for contact"
+                    )
+                raise CommandError(2400, "Command failed", reason=str(e))
+            except Exception as e:
+                logger.error(f"Failed to reject transfer for {contact_id}: {e}")
+                raise CommandError(2400, "Command failed", reason=str(e))
+
+            result_data = self.response_builder.build_contact_transfer_result(
+                contact_id=contact_id,
+                tr_status=result["trStatus"],
+                re_id=result["reID"],
+                re_date=result["reDate"],
+                ac_id=result["acID"],
+                ac_date=result["acDate"]
+            )
+
+            logger.info(f"Transfer rejected for contact: {contact_id}")
+
+            return self.success_response(
+                cl_trid=cl_trid,
+                result_data=result_data
+            )
+
+        elif op == "cancel":
+            # Cancel transfer - must be requesting registrar
+            try:
+                result = await contact_repo.cancel_transfer(
+                    contact_id=contact_id,
+                    user_id=session.user_id,
+                    requesting_account_id=session.account_id
+                )
+            except ValueError as e:
+                error_msg = str(e)
+                if "No pending transfer" in error_msg:
+                    raise CommandError(
+                        2301,
+                        "Object not pending transfer",
+                        reason="No pending transfer for contact"
+                    )
+                elif "Only requesting registrar" in error_msg:
+                    raise AuthorizationError(
+                        "Only requesting registrar can cancel transfer"
+                    )
+                raise CommandError(2400, "Command failed", reason=error_msg)
+            except Exception as e:
+                logger.error(f"Failed to cancel transfer for {contact_id}: {e}")
+                raise CommandError(2400, "Command failed", reason=str(e))
+
+            result_data = self.response_builder.build_contact_transfer_result(
+                contact_id=contact_id,
+                tr_status=result["trStatus"],
+                re_id=result["reID"],
+                re_date=result["reDate"],
+                ac_id=result["acID"],
+                ac_date=result["acDate"]
+            )
+
+            logger.info(f"Transfer cancelled for contact: {contact_id}")
+
+            return self.success_response(
+                cl_trid=cl_trid,
+                result_data=result_data
+            )
+
+    async def get_roid_from_command(
+        self,
+        command: EPPCommand,
+        session: SessionInfo
+    ) -> Optional[str]:
+        """Extract ROID for transaction logging."""
+        contact_id = command.data.get("id")
+        if contact_id:
+            contact_repo = await get_contact_repo()
+            return await contact_repo.get_roid(contact_id)
+        return None
+
+
 # Handler registry
 CONTACT_HANDLERS = {
     "check": ContactCheckHandler,
@@ -489,6 +757,7 @@ CONTACT_HANDLERS = {
     "create": ContactCreateHandler,
     "update": ContactUpdateHandler,
     "delete": ContactDeleteHandler,
+    "transfer": ContactTransferHandler,
 }
 
 

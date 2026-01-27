@@ -707,6 +707,374 @@ class ContactRepository:
         return int(count) > 0 if count else False
 
     # ========================================================================
+    # Transfer Operations
+    # ========================================================================
+
+    async def get_transfer_info(self, contact_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get pending transfer information for a contact.
+
+        Args:
+            contact_id: Contact identifier
+
+        Returns:
+            Transfer info dict or None if no pending transfer
+        """
+        roid = await self.get_roid(contact_id)
+        if not roid:
+            return None
+
+        sql = """
+            SELECT
+                t.TRX_ID,
+                t.TRX_STATUS,
+                t.TRX_REQUEST_DATE,
+                t.TRX_ACCEPT_DATE,
+                t.TRX_ACTION_DATE,
+                t.TRX_TO_ACCOUNT_ID,
+                t.TRX_FROM_ACCOUNT_ID,
+                re_acc.ACC_CLIENT_ID AS RE_ID,
+                ac_acc.ACC_CLIENT_ID AS AC_ID
+            FROM TRANSFERS t
+            JOIN ACCOUNTS re_acc ON t.TRX_TO_ACCOUNT_ID = re_acc.ACC_ID
+            JOIN ACCOUNTS ac_acc ON t.TRX_FROM_ACCOUNT_ID = ac_acc.ACC_ID
+            WHERE t.TRX_ROID = :roid
+              AND t.TRX_STATUS = 'pending'
+            ORDER BY t.TRX_REQUEST_DATE DESC
+            FETCH FIRST 1 ROWS ONLY
+        """
+        return await self.pool.query_one(sql, {"roid": roid})
+
+    async def request_transfer(
+        self,
+        contact_id: str,
+        requesting_account_id: int,
+        user_id: int,
+        auth_info: str
+    ) -> Dict[str, Any]:
+        """
+        Request transfer of a contact.
+
+        Args:
+            contact_id: Contact identifier
+            requesting_account_id: Account ID of requesting registrar
+            user_id: User ID making the request
+            auth_info: Authorization info for verification
+
+        Returns:
+            Transfer result with reID, reDate, acID, acDate
+
+        Raises:
+            ValueError: If auth info is invalid or contact already pending transfer
+        """
+        roid = await self.get_roid(contact_id)
+        if not roid:
+            raise ValueError(f"Contact not found: {contact_id}")
+
+        # Verify auth info
+        if not await self.verify_auth_info(contact_id, auth_info):
+            raise ValueError("Invalid authorization information")
+
+        # Check for existing pending transfer
+        existing = await self.get_transfer_info(contact_id)
+        if existing:
+            raise ValueError("Contact already has pending transfer")
+
+        # Check if contact has clientTransferProhibited status
+        if await self.has_status(contact_id, "clientTransferProhibited"):
+            raise ValueError("Contact transfer prohibited by client")
+
+        if await self.has_status(contact_id, "serverTransferProhibited"):
+            raise ValueError("Contact transfer prohibited by server")
+
+        # Get current sponsoring account
+        current_account = await self.get_sponsoring_account(contact_id)
+        if not current_account:
+            raise ValueError("Cannot determine current sponsor")
+
+        if current_account == requesting_account_id:
+            raise ValueError("Cannot transfer contact you already sponsor")
+
+        now = datetime.utcnow()
+        # Contact transfers typically auto-approve after 5 days per RFC
+        accept_date = datetime(now.year, now.month, now.day + 5, now.hour, now.minute, now.second)
+
+        # Get client IDs for response
+        sql = "SELECT ACC_CLIENT_ID FROM ACCOUNTS WHERE ACC_ID = :acc_id"
+        re_id = await self.pool.query_value(sql, {"acc_id": requesting_account_id})
+        ac_id = await self.pool.query_value(sql, {"acc_id": current_account})
+
+        async with self.pool.transaction() as conn:
+            # Insert transfer record
+            sql = """
+                INSERT INTO TRANSFERS (
+                    TRX_ID, TRX_ROID, TRX_STATUS,
+                    TRX_REQUEST_DATE, TRX_REQUEST_USER_ID,
+                    TRX_TO_ACCOUNT_ID, TRX_FROM_ACCOUNT_ID,
+                    TRX_ACCEPT_DATE
+                ) VALUES (
+                    TRANSFERS_SEQ.NEXTVAL, :roid, 'pending',
+                    :request_date, :user_id,
+                    :to_account, :from_account,
+                    :accept_date
+                )
+            """
+            await conn.execute(sql, {
+                "roid": roid,
+                "request_date": now,
+                "user_id": user_id,
+                "to_account": requesting_account_id,
+                "from_account": current_account,
+                "accept_date": accept_date
+            })
+
+            # Add pendingTransfer status
+            await conn.execute(
+                """INSERT INTO EPP_CONTACT_STATUSES (ECS_ROID, ECS_STATUS)
+                   VALUES (:roid, 'pendingTransfer')""",
+                {"roid": roid}
+            )
+
+            # Remove 'ok' status if present
+            await conn.execute(
+                "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid AND ECS_STATUS = 'ok'",
+                {"roid": roid}
+            )
+
+        logger.info(f"Transfer requested for contact {contact_id} by account {requesting_account_id}")
+
+        return {
+            "reID": re_id,
+            "reDate": self._format_date(now),
+            "acID": ac_id,
+            "acDate": self._format_date(accept_date)
+        }
+
+    async def approve_transfer(
+        self,
+        contact_id: str,
+        user_id: int
+    ) -> Dict[str, Any]:
+        """
+        Approve a pending contact transfer.
+
+        Args:
+            contact_id: Contact identifier
+            user_id: User ID approving the transfer
+
+        Returns:
+            Transfer result
+
+        Raises:
+            ValueError: If no pending transfer or not authorized
+        """
+        roid = await self.get_roid(contact_id)
+        if not roid:
+            raise ValueError(f"Contact not found: {contact_id}")
+
+        transfer = await self.get_transfer_info(contact_id)
+        if not transfer:
+            raise ValueError("No pending transfer for contact")
+
+        now = datetime.utcnow()
+
+        async with self.pool.transaction() as conn:
+            # Update transfer status
+            await conn.execute(
+                """UPDATE TRANSFERS
+                   SET TRX_STATUS = 'clientApproved', TRX_ACTION_DATE = :action_date
+                   WHERE TRX_ROID = :roid AND TRX_STATUS = 'pending'""",
+                {"roid": roid, "action_date": now}
+            )
+
+            # Transfer sponsorship to new registrar
+            await conn.execute(
+                """UPDATE REGISTRY_OBJECTS
+                   SET OBJ_MANAGE_ACCOUNT_ID = :new_account,
+                       OBJ_TRANSFER_DATE = :transfer_date,
+                       OBJ_UPDATE_DATE = :update_date,
+                       OBJ_UPDATE_USER_ID = :user_id
+                   WHERE OBJ_ROID = :roid""",
+                {
+                    "roid": roid,
+                    "new_account": transfer["TRX_TO_ACCOUNT_ID"],
+                    "transfer_date": now,
+                    "update_date": now,
+                    "user_id": user_id
+                }
+            )
+
+            # Remove pendingTransfer status
+            await conn.execute(
+                "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid AND ECS_STATUS = 'pendingTransfer'",
+                {"roid": roid}
+            )
+
+            # Add 'ok' status back
+            await conn.execute(
+                "INSERT INTO EPP_CONTACT_STATUSES (ECS_ROID, ECS_STATUS) VALUES (:roid, 'ok')",
+                {"roid": roid}
+            )
+
+        logger.info(f"Transfer approved for contact {contact_id}")
+
+        return {
+            "trStatus": "clientApproved",
+            "reID": transfer["RE_ID"],
+            "reDate": self._format_date(transfer["TRX_REQUEST_DATE"]),
+            "acID": transfer["AC_ID"],
+            "acDate": self._format_date(now)
+        }
+
+    async def reject_transfer(
+        self,
+        contact_id: str,
+        user_id: int
+    ) -> Dict[str, Any]:
+        """
+        Reject a pending contact transfer.
+
+        Args:
+            contact_id: Contact identifier
+            user_id: User ID rejecting the transfer
+
+        Returns:
+            Transfer result
+
+        Raises:
+            ValueError: If no pending transfer
+        """
+        roid = await self.get_roid(contact_id)
+        if not roid:
+            raise ValueError(f"Contact not found: {contact_id}")
+
+        transfer = await self.get_transfer_info(contact_id)
+        if not transfer:
+            raise ValueError("No pending transfer for contact")
+
+        now = datetime.utcnow()
+
+        async with self.pool.transaction() as conn:
+            # Update transfer status
+            await conn.execute(
+                """UPDATE TRANSFERS
+                   SET TRX_STATUS = 'clientRejected', TRX_ACTION_DATE = :action_date
+                   WHERE TRX_ROID = :roid AND TRX_STATUS = 'pending'""",
+                {"roid": roid, "action_date": now}
+            )
+
+            # Remove pendingTransfer status
+            await conn.execute(
+                "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid AND ECS_STATUS = 'pendingTransfer'",
+                {"roid": roid}
+            )
+
+            # Add 'ok' status back
+            await conn.execute(
+                "INSERT INTO EPP_CONTACT_STATUSES (ECS_ROID, ECS_STATUS) VALUES (:roid, 'ok')",
+                {"roid": roid}
+            )
+
+        logger.info(f"Transfer rejected for contact {contact_id}")
+
+        return {
+            "trStatus": "clientRejected",
+            "reID": transfer["RE_ID"],
+            "reDate": self._format_date(transfer["TRX_REQUEST_DATE"]),
+            "acID": transfer["AC_ID"],
+            "acDate": self._format_date(now)
+        }
+
+    async def cancel_transfer(
+        self,
+        contact_id: str,
+        user_id: int,
+        requesting_account_id: int
+    ) -> Dict[str, Any]:
+        """
+        Cancel a pending contact transfer.
+
+        Only the requesting registrar can cancel.
+
+        Args:
+            contact_id: Contact identifier
+            user_id: User ID cancelling the transfer
+            requesting_account_id: Account ID that must match original requestor
+
+        Returns:
+            Transfer result
+
+        Raises:
+            ValueError: If no pending transfer or not authorized
+        """
+        roid = await self.get_roid(contact_id)
+        if not roid:
+            raise ValueError(f"Contact not found: {contact_id}")
+
+        transfer = await self.get_transfer_info(contact_id)
+        if not transfer:
+            raise ValueError("No pending transfer for contact")
+
+        # Verify the cancelling registrar is the one who requested
+        if transfer["TRX_TO_ACCOUNT_ID"] != requesting_account_id:
+            raise ValueError("Only requesting registrar can cancel transfer")
+
+        now = datetime.utcnow()
+
+        async with self.pool.transaction() as conn:
+            # Update transfer status
+            await conn.execute(
+                """UPDATE TRANSFERS
+                   SET TRX_STATUS = 'clientCancelled', TRX_ACTION_DATE = :action_date
+                   WHERE TRX_ROID = :roid AND TRX_STATUS = 'pending'""",
+                {"roid": roid, "action_date": now}
+            )
+
+            # Remove pendingTransfer status
+            await conn.execute(
+                "DELETE FROM EPP_CONTACT_STATUSES WHERE ECS_ROID = :roid AND ECS_STATUS = 'pendingTransfer'",
+                {"roid": roid}
+            )
+
+            # Add 'ok' status back
+            await conn.execute(
+                "INSERT INTO EPP_CONTACT_STATUSES (ECS_ROID, ECS_STATUS) VALUES (:roid, 'ok')",
+                {"roid": roid}
+            )
+
+        logger.info(f"Transfer cancelled for contact {contact_id}")
+
+        return {
+            "trStatus": "clientCancelled",
+            "reID": transfer["RE_ID"],
+            "reDate": self._format_date(transfer["TRX_REQUEST_DATE"]),
+            "acID": transfer["AC_ID"],
+            "acDate": self._format_date(now)
+        }
+
+    async def query_transfer(self, contact_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Query transfer status for a contact.
+
+        Args:
+            contact_id: Contact identifier
+
+        Returns:
+            Transfer info or None
+        """
+        transfer = await self.get_transfer_info(contact_id)
+        if not transfer:
+            return None
+
+        return {
+            "trStatus": transfer["TRX_STATUS"],
+            "reID": transfer["RE_ID"],
+            "reDate": self._format_date(transfer["TRX_REQUEST_DATE"]),
+            "acID": transfer["AC_ID"],
+            "acDate": self._format_date(transfer["TRX_ACCEPT_DATE"])
+        }
+
+    # ========================================================================
     # Utility Methods
     # ========================================================================
 

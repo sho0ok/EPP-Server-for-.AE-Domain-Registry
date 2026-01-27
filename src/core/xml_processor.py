@@ -18,12 +18,31 @@ DOMAIN_NS = "urn:ietf:params:xml:ns:domain-1.0"
 CONTACT_NS = "urn:ietf:params:xml:ns:contact-1.0"
 HOST_NS = "urn:ietf:params:xml:ns:host-1.0"
 
+# Extension Namespaces
+AEEXT_NS = "urn:X-ae:params:xml:ns:aeext-1.0"
+AREXT_NS = "urn:X-ar:params:xml:ns:arext-1.0"
+AUEXT_NS = "urn:X-au:params:xml:ns:auext-1.1"
+E164_NS = "urn:ietf:params:xml:ns:e164epp-1.0"
+SECDNS_NS = "urn:ietf:params:xml:ns:secDNS-1.1"
+IDN_NS = "urn:X-ar:params:xml:ns:idnadomain-1.0"
+VARIANT_NS = "urn:X-ar:params:xml:ns:variant-1.0"
+SYNC_NS = "urn:X-ar:params:xml:ns:sync-1.0"
+KV_NS = "urn:X-ar:params:xml:ns:kv-1.0"
+
 # Namespace map for XPath queries
 NSMAP = {
     "epp": EPP_NS,
     "domain": DOMAIN_NS,
     "contact": CONTACT_NS,
     "host": HOST_NS,
+    "aeext": AEEXT_NS,
+    "arext": AREXT_NS,
+    "e164": E164_NS,
+    "secDNS": SECDNS_NS,
+    "idnadomain": IDN_NS,
+    "variant": VARIANT_NS,
+    "sync": SYNC_NS,
+    "kv": KV_NS,
 }
 
 
@@ -167,6 +186,21 @@ class XMLProcessor:
             msg_id = poll_elem.get("msgID")
             return "poll", None, {"op": op, "msgID": msg_id}
 
+        # Check for AE extension protocol command (aeext:command)
+        ae_cmd = command_elem.find(f"{{{AEEXT_NS}}}command")
+        if ae_cmd is not None:
+            return self._parse_aeext_command(ae_cmd)
+
+        # Check for AR extension protocol command (arext:command)
+        ar_cmd = command_elem.find(f"{{{AREXT_NS}}}command")
+        if ar_cmd is not None:
+            return self._parse_arext_command(ar_cmd)
+
+        # Check for AU extension protocol command (auext:command)
+        au_cmd = command_elem.find(f"{{{AUEXT_NS}}}command")
+        if au_cmd is not None:
+            return self._parse_auext_command(au_cmd)
+
         # Object commands
         for cmd in ["check", "info", "create", "delete", "update", "renew", "transfer"]:
             elem = _find_element(command_elem, cmd, NSMAP)
@@ -238,15 +272,26 @@ class XMLProcessor:
         Returns:
             Tuple of (object_type, data)
         """
+        # For transfer commands, capture the op attribute from the outer element
+        transfer_op = None
+        if cmd == "transfer":
+            transfer_op = cmd_elem.get("op", "request")
+
         # Find the object-specific element
         for obj_type, ns in [("domain", DOMAIN_NS), ("contact", CONTACT_NS), ("host", HOST_NS)]:
             obj_elem = cmd_elem.find(f"{{{ns}}}{cmd}")
             if obj_elem is not None:
                 parser = getattr(self, f"_parse_{obj_type}_{cmd}", None)
                 if parser:
-                    return obj_type, parser(obj_elem)
+                    data = parser(obj_elem)
                 else:
-                    return obj_type, self._generic_parse(obj_elem)
+                    data = self._generic_parse(obj_elem)
+
+                # Add transfer op if this is a transfer command
+                if transfer_op is not None:
+                    data["op"] = transfer_op
+
+                return obj_type, data
 
         raise XMLValidationError(f"No object found in {cmd} command")
 
@@ -604,6 +649,34 @@ class XMLProcessor:
             data["id"] = id_elem.text
         return data
 
+    def _parse_contact_transfer(self, elem: etree._Element) -> Dict[str, Any]:
+        """
+        Parse contact:transfer command.
+
+        Per RFC 5733, contact transfer uses authIDType:
+        - id: Contact identifier (required)
+        - authInfo: Authorization info (required for request, optional for query)
+        """
+        data = {}
+
+        # Contact ID (required)
+        id_elem = elem.find(f"{{{CONTACT_NS}}}id")
+        if id_elem is not None:
+            data["id"] = id_elem.text
+
+        # Auth info (required for request op, optional otherwise)
+        auth_info = elem.find(f"{{{CONTACT_NS}}}authInfo")
+        if auth_info is not None:
+            pw = auth_info.find(f"{{{CONTACT_NS}}}pw")
+            if pw is not None:
+                data["authInfo"] = pw.text
+                # ROID attribute for linked auth info
+                roid = pw.get("roid")
+                if roid:
+                    data["authInfo_roid"] = roid
+
+        return data
+
     def _parse_host_check(self, elem: etree._Element) -> Dict[str, Any]:
         """Parse host:check command."""
         names = []
@@ -694,6 +767,290 @@ class XMLProcessor:
             data["name"] = name.text.lower() if name.text else None
         return data
 
+    def _parse_aeext_command(
+        self,
+        cmd_elem: etree._Element
+    ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        """
+        Parse aeext:command protocol extension.
+
+        Handles:
+        - registrantTransfer: Transfer domain to new legal entity
+
+        Returns:
+            Tuple of (command_type, object_type, data)
+        """
+        # Check for registrantTransfer
+        reg_transfer = cmd_elem.find(f"{{{AEEXT_NS}}}registrantTransfer")
+        if reg_transfer is not None:
+            data = self._parse_ae_registrant_transfer(reg_transfer)
+            return "ae_transfer_registrant", "domain", data
+
+        raise XMLValidationError("Unknown aeext:command type")
+
+    def _parse_ae_registrant_transfer(
+        self,
+        elem: etree._Element
+    ) -> Dict[str, Any]:
+        """
+        Parse aeext:registrantTransfer command.
+
+        Per aeext-1.0.xsd, registrantTransfer contains:
+        - name: Domain name (required)
+        - curExpDate: Current expiry date (required, prevents replay)
+        - aeProperties: Required AE properties
+        - period: Optional validity period
+        - explanation: Required explanation (max 1000 chars)
+        """
+        data = {}
+
+        # Domain name
+        name = elem.find(f"{{{AEEXT_NS}}}name")
+        if name is not None and name.text:
+            data["name"] = name.text.lower()
+
+        # Current expiry date (required to prevent replay)
+        cur_exp = elem.find(f"{{{AEEXT_NS}}}curExpDate")
+        if cur_exp is not None and cur_exp.text:
+            data["curExpDate"] = cur_exp.text
+
+        # Period (optional, defaults to 1 year)
+        period = elem.find(f"{{{AEEXT_NS}}}period")
+        if period is not None:
+            data["period"] = int(period.text) if period.text else 1
+            data["period_unit"] = period.get("unit", "y")
+
+        # AE properties
+        ae_props = elem.find(f"{{{AEEXT_NS}}}aeProperties")
+        if ae_props is not None:
+            props = self._parse_ae_properties(ae_props)
+            data.update(props)
+
+        # Explanation (required)
+        explanation = elem.find(f"{{{AEEXT_NS}}}explanation")
+        if explanation is not None and explanation.text:
+            data["explanation"] = explanation.text
+
+        return data
+
+    def _parse_ae_properties(self, elem: etree._Element) -> Dict[str, Any]:
+        """
+        Parse aeext:aeProperties element.
+
+        Per aeext-1.0.xsd:
+        - registrantName: Required
+        - registrantID + type: Optional
+        - eligibilityType: Required
+        - eligibilityName: Optional
+        - eligibilityID + type: Optional
+        - policyReason: Optional (1-99)
+        """
+        data = {}
+
+        # registrantName (required)
+        registrant_name = elem.find(f"{{{AEEXT_NS}}}registrantName")
+        if registrant_name is not None and registrant_name.text:
+            data["registrantName"] = registrant_name.text
+
+        # registrantID (optional, has type attribute)
+        registrant_id = elem.find(f"{{{AEEXT_NS}}}registrantID")
+        if registrant_id is not None and registrant_id.text:
+            data["registrantID"] = registrant_id.text
+            data["registrantIDType"] = registrant_id.get("type")
+
+        # eligibilityType (required)
+        elig_type = elem.find(f"{{{AEEXT_NS}}}eligibilityType")
+        if elig_type is not None and elig_type.text:
+            data["eligibilityType"] = elig_type.text
+
+        # eligibilityName (optional)
+        elig_name = elem.find(f"{{{AEEXT_NS}}}eligibilityName")
+        if elig_name is not None and elig_name.text:
+            data["eligibilityName"] = elig_name.text
+
+        # eligibilityID (optional, has type attribute)
+        elig_id = elem.find(f"{{{AEEXT_NS}}}eligibilityID")
+        if elig_id is not None and elig_id.text:
+            data["eligibilityID"] = elig_id.text
+            data["eligibilityIDType"] = elig_id.get("type")
+
+        # policyReason (optional, integer 1-99)
+        policy_reason = elem.find(f"{{{AEEXT_NS}}}policyReason")
+        if policy_reason is not None and policy_reason.text:
+            data["policyReason"] = int(policy_reason.text)
+
+        return data
+
+    def _parse_arext_command(
+        self,
+        cmd_elem: etree._Element
+    ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        """
+        Parse arext:command protocol extension.
+
+        Handles:
+        - undelete: Restore a deleted domain
+        - unrenew: Cancel a pending renewal
+        - policyDelete: Delete for policy violation
+
+        Returns:
+            Tuple of (command_type, object_type, data)
+        """
+        # Check for undelete
+        undelete = cmd_elem.find(f"{{{AREXT_NS}}}undelete")
+        if undelete is not None:
+            data = self._parse_ar_domain_name_only(undelete)
+            return "ar_undelete", "domain", data
+
+        # Check for unrenew
+        unrenew = cmd_elem.find(f"{{{AREXT_NS}}}unrenew")
+        if unrenew is not None:
+            data = self._parse_ar_domain_name_only(unrenew)
+            return "ar_unrenew", "domain", data
+
+        # Check for policyDelete
+        policy_delete = cmd_elem.find(f"{{{AREXT_NS}}}policyDelete")
+        if policy_delete is not None:
+            data = self._parse_ar_policy_delete(policy_delete)
+            return "ar_policy_delete", "domain", data
+
+        raise XMLValidationError("Unknown arext:command type")
+
+    def _parse_ar_domain_name_only(self, elem: etree._Element) -> Dict[str, Any]:
+        """Parse AR command with only domain name."""
+        data = {}
+        name = elem.find(f"{{{AREXT_NS}}}name")
+        if name is not None and name.text:
+            data["name"] = name.text.lower()
+        return data
+
+    def _parse_ar_policy_delete(self, elem: etree._Element) -> Dict[str, Any]:
+        """Parse arext:policyDelete command."""
+        data = {}
+        name = elem.find(f"{{{AREXT_NS}}}name")
+        if name is not None and name.text:
+            data["name"] = name.text.lower()
+
+        reason = elem.find(f"{{{AREXT_NS}}}reason")
+        if reason is not None and reason.text:
+            data["reason"] = reason.text
+
+        return data
+
+    def _parse_auext_command(
+        self,
+        cmd_elem: etree._Element
+    ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        """
+        Parse auext:command protocol extension.
+
+        Handles:
+        - registrantTransfer: Transfer domain to new legal entity
+
+        Returns:
+            Tuple of (command_type, object_type, data)
+        """
+        # Check for registrantTransfer
+        reg_transfer = cmd_elem.find(f"{{{AUEXT_NS}}}registrantTransfer")
+        if reg_transfer is not None:
+            data = self._parse_au_registrant_transfer(reg_transfer)
+            return "au_transfer_registrant", "domain", data
+
+        raise XMLValidationError("Unknown auext:command type")
+
+    def _parse_au_registrant_transfer(
+        self,
+        elem: etree._Element
+    ) -> Dict[str, Any]:
+        """
+        Parse auext:registrantTransfer command.
+
+        Per auext-1.1.xsd, registrantTransfer contains:
+        - name: Domain name (required)
+        - curExpDate: Current expiry date (required, prevents replay)
+        - auProperties: Required AU properties
+        - period: Optional validity period
+        - explanation: Required explanation (max 1000 chars)
+        """
+        data = {}
+
+        # Domain name
+        name = elem.find(f"{{{AUEXT_NS}}}name")
+        if name is not None and name.text:
+            data["name"] = name.text.lower()
+
+        # Current expiry date (required to prevent replay)
+        cur_exp = elem.find(f"{{{AUEXT_NS}}}curExpDate")
+        if cur_exp is not None and cur_exp.text:
+            data["curExpDate"] = cur_exp.text
+
+        # Period (optional, defaults to 1 year)
+        period = elem.find(f"{{{AUEXT_NS}}}period")
+        if period is not None:
+            data["period"] = int(period.text) if period.text else 1
+            data["period_unit"] = period.get("unit", "y")
+
+        # AU properties
+        au_props = elem.find(f"{{{AUEXT_NS}}}auProperties")
+        if au_props is not None:
+            props = self._parse_au_properties(au_props)
+            data.update(props)
+
+        # Explanation (required)
+        explanation = elem.find(f"{{{AUEXT_NS}}}explanation")
+        if explanation is not None and explanation.text:
+            data["explanation"] = explanation.text
+
+        return data
+
+    def _parse_au_properties(self, elem: etree._Element) -> Dict[str, Any]:
+        """
+        Parse auext:auProperties element.
+
+        Per auext-1.1.xsd:
+        - registrantName: Required
+        - registrantID + type: Optional
+        - eligibilityType: Required
+        - eligibilityName: Optional
+        - eligibilityID + type: Optional
+        - policyReason: Required (1-106)
+        """
+        data = {}
+
+        # registrantName (required)
+        registrant_name = elem.find(f"{{{AUEXT_NS}}}registrantName")
+        if registrant_name is not None and registrant_name.text:
+            data["registrantName"] = registrant_name.text
+
+        # registrantID (optional, has type attribute)
+        registrant_id = elem.find(f"{{{AUEXT_NS}}}registrantID")
+        if registrant_id is not None and registrant_id.text:
+            data["registrantID"] = registrant_id.text
+            data["registrantIDType"] = registrant_id.get("type")
+
+        # eligibilityType (required)
+        elig_type = elem.find(f"{{{AUEXT_NS}}}eligibilityType")
+        if elig_type is not None and elig_type.text:
+            data["eligibilityType"] = elig_type.text
+
+        # eligibilityName (optional)
+        elig_name = elem.find(f"{{{AUEXT_NS}}}eligibilityName")
+        if elig_name is not None and elig_name.text:
+            data["eligibilityName"] = elig_name.text
+
+        # eligibilityID (optional, has type attribute)
+        elig_id = elem.find(f"{{{AUEXT_NS}}}eligibilityID")
+        if elig_id is not None and elig_id.text:
+            data["eligibilityID"] = elig_id.text
+            data["eligibilityIDType"] = elig_id.get("type")
+
+        # policyReason (required, integer 1-106)
+        policy_reason = elem.find(f"{{{AUEXT_NS}}}policyReason")
+        if policy_reason is not None and policy_reason.text:
+            data["policyReason"] = int(policy_reason.text)
+
+        return data
+
     def _parse_extensions(self, command_elem: etree._Element) -> Dict[str, Any]:
         """Parse command extensions."""
         extensions = {}
@@ -703,10 +1060,37 @@ class XMLProcessor:
                 ns = child.tag.split("}")[0].strip("{") if "}" in child.tag else None
                 tag = child.tag.split("}")[-1]
 
-                # Parse AE eligibility extension
-                if "aeEligibility" in tag or "eligibility" in tag.lower():
+                # Parse AE extension (aeext:update, aeext:create)
+                if ns == AEEXT_NS:
+                    extensions["aeext"] = self._parse_aeext_extension(child, tag)
+                # Parse AR extension (arext:update)
+                elif ns == AREXT_NS:
+                    extensions["arext"] = self._parse_arext_extension(child, tag)
+                # Parse AU extension (auext:update, auext:create)
+                elif ns == AUEXT_NS:
+                    extensions["auext"] = self._parse_auext_extension(child, tag)
+                # Parse E.164/ENUM extension (e164:create, e164:update)
+                elif ns == E164_NS:
+                    extensions["e164"] = self._parse_e164_extension(child, tag)
+                # Parse secDNS extension (secDNS:create, secDNS:update)
+                elif ns == SECDNS_NS:
+                    extensions["secDNS"] = self._parse_secdns_extension(child, tag)
+                # Parse IDN extension (idnadomain:create)
+                elif ns == IDN_NS:
+                    extensions["idnadomain"] = self._parse_idn_extension(child, tag)
+                # Parse Variant extension (variant:info, variant:update)
+                elif ns == VARIANT_NS:
+                    extensions["variant"] = self._parse_variant_extension(child, tag)
+                # Parse Sync extension (sync:update)
+                elif ns == SYNC_NS:
+                    extensions["sync"] = self._parse_sync_extension(child, tag)
+                # Parse KV extension (kv:create, kv:update)
+                elif ns == KV_NS:
+                    extensions["kv"] = self._parse_kv_extension(child, tag)
+                # Parse AE eligibility extension (legacy support)
+                elif "aeEligibility" in tag or "eligibility" in tag.lower():
                     extensions["aeEligibility"] = self._parse_ae_eligibility(child, ns)
-                # Parse AE domain extension (for policy reasons, etc.)
+                # Parse AE domain extension (legacy support)
                 elif "aeDomain" in tag or "domain" in tag.lower() and "ae" in (ns or "").lower():
                     extensions["aeDomain"] = self._parse_ae_domain(child, ns)
                 else:
@@ -717,6 +1101,423 @@ class XMLProcessor:
                         "data": self._parse_extension_generic(child)
                     }
         return extensions
+
+    def _parse_aeext_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse aeext extension attached to domain commands.
+
+        Handles:
+        - aeext:create: AE properties for domain create
+        - aeext:update: AE properties + explanation for domain update (modify registrant)
+        """
+        data = {"command": tag}
+
+        # AE properties (present in both create and update)
+        ae_props = elem.find(f"{{{AEEXT_NS}}}aeProperties")
+        if ae_props is not None:
+            props = self._parse_ae_properties(ae_props)
+            data.update(props)
+
+        # Explanation (required for update/modify registrant)
+        explanation = elem.find(f"{{{AEEXT_NS}}}explanation")
+        if explanation is not None and explanation.text:
+            data["explanation"] = explanation.text
+
+        return data
+
+    def _parse_arext_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """Parse arext extension attached to domain commands."""
+        data = {"command": tag}
+
+        # Parse any child elements
+        for child in elem:
+            child_tag = child.tag.split("}")[-1]
+            if child.text and child.text.strip():
+                data[child_tag] = child.text.strip()
+
+        return data
+
+    def _parse_auext_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse auext extension attached to domain commands.
+
+        Handles:
+        - auext:create: AU properties for domain create
+        - auext:update: AU properties + explanation for domain update (modify registrant)
+        """
+        data = {"command": tag}
+
+        # AU properties (present in both create and update)
+        au_props = elem.find(f"{{{AUEXT_NS}}}auProperties")
+        if au_props is not None:
+            props = self._parse_au_properties(au_props)
+            data.update(props)
+
+        # Explanation (required for update/modify registrant)
+        explanation = elem.find(f"{{{AUEXT_NS}}}explanation")
+        if explanation is not None and explanation.text:
+            data["explanation"] = explanation.text
+
+        return data
+
+    def _parse_e164_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse E.164/ENUM extension attached to domain commands.
+
+        Per e164epp-1.0.xsd (RFC 4114):
+        - e164:create: Contains NAPTR records for domain create
+        - e164:update: Contains add/rem for NAPTR records
+
+        NAPTR record structure:
+        - order: unsigned short (required)
+        - pref: unsigned short (required)
+        - flags: single character [A-Za-z0-9] (optional)
+        - svc: service field (required)
+        - regex: regular expression (optional)
+        - repl: replacement domain (optional)
+        """
+        data = {"command": tag, "naptr": []}
+
+        if tag == "create":
+            # Parse NAPTR records for create
+            for naptr in elem.findall(f"{{{E164_NS}}}naptr"):
+                record = self._parse_e164_naptr(naptr)
+                if record:
+                    data["naptr"].append(record)
+
+        elif tag == "update":
+            # Parse add section
+            add_elem = elem.find(f"{{{E164_NS}}}add")
+            if add_elem is not None:
+                data["add_naptr"] = []
+                for naptr in add_elem.findall(f"{{{E164_NS}}}naptr"):
+                    record = self._parse_e164_naptr(naptr)
+                    if record:
+                        data["add_naptr"].append(record)
+
+            # Parse rem section
+            rem_elem = elem.find(f"{{{E164_NS}}}rem")
+            if rem_elem is not None:
+                data["rem_naptr"] = []
+                for naptr in rem_elem.findall(f"{{{E164_NS}}}naptr"):
+                    record = self._parse_e164_naptr(naptr)
+                    if record:
+                        data["rem_naptr"].append(record)
+
+        return data
+
+    def _parse_e164_naptr(self, elem: etree._Element) -> Dict[str, Any]:
+        """
+        Parse a single e164:naptr element.
+
+        Returns:
+            Dict with order, pref, flags, svc, regex, repl fields
+        """
+        record = {}
+
+        # order (required)
+        order = elem.find(f"{{{E164_NS}}}order")
+        if order is not None and order.text:
+            record["order"] = int(order.text)
+
+        # pref (required)
+        pref = elem.find(f"{{{E164_NS}}}pref")
+        if pref is not None and pref.text:
+            record["pref"] = int(pref.text)
+
+        # flags (optional, single char)
+        flags = elem.find(f"{{{E164_NS}}}flags")
+        if flags is not None and flags.text:
+            record["flags"] = flags.text
+
+        # svc (required)
+        svc = elem.find(f"{{{E164_NS}}}svc")
+        if svc is not None and svc.text:
+            record["svc"] = svc.text
+
+        # regex (optional)
+        regex = elem.find(f"{{{E164_NS}}}regex")
+        if regex is not None and regex.text:
+            record["regex"] = regex.text
+
+        # repl (optional, max 255 chars)
+        repl = elem.find(f"{{{E164_NS}}}repl")
+        if repl is not None and repl.text:
+            record["repl"] = repl.text
+
+        return record
+
+    def _parse_secdns_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse secDNS extension (DNSSEC) attached to domain commands.
+
+        Per secDNS-1.1.xsd:
+        - secDNS:create: Add DS/Key data to domain create
+        - secDNS:update: Add/remove/change DNSSEC data
+
+        DS Data structure:
+        - keyTag: unsigned short
+        - alg: unsigned byte (algorithm number)
+        - digestType: unsigned byte
+        - digest: hex binary
+        - keyData: optional nested key data
+
+        Key Data structure:
+        - flags: unsigned short (256=ZSK, 257=KSK)
+        - protocol: unsigned byte (always 3)
+        - alg: unsigned byte
+        - pubKey: base64 binary
+        """
+        data = {"command": tag}
+
+        if tag == "create":
+            # Parse maxSigLife
+            max_sig = elem.find(f"{{{SECDNS_NS}}}maxSigLife")
+            if max_sig is not None and max_sig.text:
+                data["maxSigLife"] = int(max_sig.text)
+
+            # Parse dsData or keyData
+            data["dsData"] = []
+            data["keyData"] = []
+
+            for ds in elem.findall(f"{{{SECDNS_NS}}}dsData"):
+                ds_record = self._parse_secdns_ds_data(ds)
+                if ds_record:
+                    data["dsData"].append(ds_record)
+
+            for key in elem.findall(f"{{{SECDNS_NS}}}keyData"):
+                key_record = self._parse_secdns_key_data(key)
+                if key_record:
+                    data["keyData"].append(key_record)
+
+        elif tag == "update":
+            # Parse urgent attribute
+            data["urgent"] = elem.get("urgent", "false").lower() == "true"
+
+            # Parse rem section
+            rem = elem.find(f"{{{SECDNS_NS}}}rem")
+            if rem is not None:
+                all_elem = rem.find(f"{{{SECDNS_NS}}}all")
+                if all_elem is not None and all_elem.text:
+                    data["rem_all"] = all_elem.text.lower() == "true"
+                else:
+                    data["rem_dsData"] = []
+                    data["rem_keyData"] = []
+                    for ds in rem.findall(f"{{{SECDNS_NS}}}dsData"):
+                        ds_record = self._parse_secdns_ds_data(ds)
+                        if ds_record:
+                            data["rem_dsData"].append(ds_record)
+                    for key in rem.findall(f"{{{SECDNS_NS}}}keyData"):
+                        key_record = self._parse_secdns_key_data(key)
+                        if key_record:
+                            data["rem_keyData"].append(key_record)
+
+            # Parse add section
+            add = elem.find(f"{{{SECDNS_NS}}}add")
+            if add is not None:
+                max_sig = add.find(f"{{{SECDNS_NS}}}maxSigLife")
+                if max_sig is not None and max_sig.text:
+                    data["add_maxSigLife"] = int(max_sig.text)
+
+                data["add_dsData"] = []
+                data["add_keyData"] = []
+                for ds in add.findall(f"{{{SECDNS_NS}}}dsData"):
+                    ds_record = self._parse_secdns_ds_data(ds)
+                    if ds_record:
+                        data["add_dsData"].append(ds_record)
+                for key in add.findall(f"{{{SECDNS_NS}}}keyData"):
+                    key_record = self._parse_secdns_key_data(key)
+                    if key_record:
+                        data["add_keyData"].append(key_record)
+
+            # Parse chg section
+            chg = elem.find(f"{{{SECDNS_NS}}}chg")
+            if chg is not None:
+                max_sig = chg.find(f"{{{SECDNS_NS}}}maxSigLife")
+                if max_sig is not None and max_sig.text:
+                    data["chg_maxSigLife"] = int(max_sig.text)
+
+        return data
+
+    def _parse_secdns_ds_data(self, elem: etree._Element) -> Dict[str, Any]:
+        """Parse a single secDNS:dsData element."""
+        record = {}
+
+        key_tag = elem.find(f"{{{SECDNS_NS}}}keyTag")
+        if key_tag is not None and key_tag.text:
+            record["keyTag"] = int(key_tag.text)
+
+        alg = elem.find(f"{{{SECDNS_NS}}}alg")
+        if alg is not None and alg.text:
+            record["alg"] = int(alg.text)
+
+        digest_type = elem.find(f"{{{SECDNS_NS}}}digestType")
+        if digest_type is not None and digest_type.text:
+            record["digestType"] = int(digest_type.text)
+
+        digest = elem.find(f"{{{SECDNS_NS}}}digest")
+        if digest is not None and digest.text:
+            record["digest"] = digest.text
+
+        # Optional nested keyData
+        key_data = elem.find(f"{{{SECDNS_NS}}}keyData")
+        if key_data is not None:
+            record["keyData"] = self._parse_secdns_key_data(key_data)
+
+        return record
+
+    def _parse_secdns_key_data(self, elem: etree._Element) -> Dict[str, Any]:
+        """Parse a single secDNS:keyData element."""
+        record = {}
+
+        flags = elem.find(f"{{{SECDNS_NS}}}flags")
+        if flags is not None and flags.text:
+            record["flags"] = int(flags.text)
+
+        protocol = elem.find(f"{{{SECDNS_NS}}}protocol")
+        if protocol is not None and protocol.text:
+            record["protocol"] = int(protocol.text)
+
+        alg = elem.find(f"{{{SECDNS_NS}}}alg")
+        if alg is not None and alg.text:
+            record["alg"] = int(alg.text)
+
+        pub_key = elem.find(f"{{{SECDNS_NS}}}pubKey")
+        if pub_key is not None and pub_key.text:
+            record["pubKey"] = pub_key.text
+
+        return record
+
+    def _parse_idn_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse IDN (Internationalized Domain Name) extension.
+
+        Per idnadomain-1.0.xsd:
+        - idnadomain:create: Contains userForm with language attribute
+        """
+        data = {"command": tag}
+
+        if tag == "create":
+            user_form = elem.find(f"{{{IDN_NS}}}userForm")
+            if user_form is not None:
+                data["userForm"] = user_form.text
+                data["language"] = user_form.get("language")
+
+        return data
+
+    def _parse_variant_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse Variant extension for IDN domain variants.
+
+        Per variant-1.0.xsd:
+        - variant:info: Query variants (attribute variants="all"|"none")
+        - variant:update: Add/remove variants
+        """
+        data = {"command": tag}
+
+        if tag == "info":
+            data["variants"] = elem.get("variants", "all")
+
+        elif tag == "update":
+            # Parse add section
+            add = elem.find(f"{{{VARIANT_NS}}}add")
+            if add is not None:
+                data["add_variants"] = []
+                for var in add.findall(f"{{{VARIANT_NS}}}variant"):
+                    variant_data = {
+                        "name": var.text,
+                        "userForm": var.get("userForm")
+                    }
+                    data["add_variants"].append(variant_data)
+
+            # Parse rem section
+            rem = elem.find(f"{{{VARIANT_NS}}}rem")
+            if rem is not None:
+                data["rem_variants"] = []
+                for var in rem.findall(f"{{{VARIANT_NS}}}variant"):
+                    variant_data = {
+                        "name": var.text,
+                        "userForm": var.get("userForm")
+                    }
+                    data["rem_variants"].append(variant_data)
+
+        return data
+
+    def _parse_sync_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse Sync extension for expiry date synchronization.
+
+        Per sync-1.0.xsd:
+        - sync:update: Contains exDate to sync to
+        """
+        data = {"command": tag}
+
+        if tag == "update":
+            ex_date = elem.find(f"{{{SYNC_NS}}}exDate")
+            if ex_date is not None and ex_date.text:
+                data["exDate"] = ex_date.text
+
+        return data
+
+    def _parse_kv_extension(
+        self,
+        elem: etree._Element,
+        tag: str
+    ) -> Dict[str, Any]:
+        """
+        Parse KV (Key-Value) extension.
+
+        Per kv-1.0.xsd:
+        - kv:create: Create kvlists with items
+        - kv:update: Update/replace kvlists
+        """
+        data = {"command": tag, "kvlists": []}
+
+        for kvlist in elem.findall(f"{{{KV_NS}}}kvlist"):
+            list_data = {
+                "name": kvlist.get("name"),
+                "items": []
+            }
+            for item in kvlist.findall(f"{{{KV_NS}}}item"):
+                list_data["items"].append({
+                    "key": item.get("key"),
+                    "value": item.text
+                })
+            data["kvlists"].append(list_data)
+
+        return data
 
     def _parse_ae_eligibility(self, elem: etree._Element, ns: str) -> Dict[str, Any]:
         """

@@ -33,7 +33,7 @@ class ROIDGenerator:
         """
         self.pool = pool
         self.suffix = suffix
-        self._sequence_name = "OBJ_ROID_SEQ"
+        self._sequence_name = "OBJ_ID_SEQ"
 
     async def generate(self) -> str:
         """

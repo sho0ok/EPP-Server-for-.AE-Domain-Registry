@@ -29,6 +29,91 @@ class QueryError(DatabaseError):
     pass
 
 
+class TransactionConnection:
+    """
+    Wrapper for connection with transaction-friendly execute method.
+
+    Used within pool.transaction() context manager.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def execute(self, sql: str, params: Optional[Dict[str, Any]] = None) -> int:
+        """
+        Execute SQL statement within the transaction.
+
+        Args:
+            sql: SQL statement with named parameters
+            params: Dictionary of parameter values
+
+        Returns:
+            Number of rows affected
+        """
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params or {})
+        rowcount = cursor.rowcount
+        cursor.close()
+        return rowcount
+
+    async def query(self, sql: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Execute SELECT query within the transaction.
+
+        Args:
+            sql: SELECT statement
+            params: Dictionary of parameter values
+
+        Returns:
+            List of row dictionaries
+        """
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params or {})
+        columns = [col[0] for col in cursor.description]
+        rows = cursor.fetchall()
+        result = [dict(zip(columns, row)) for row in rows]
+        cursor.close()
+        return result
+
+    async def query_one(self, sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Execute SELECT query and return first row.
+
+        Args:
+            sql: SELECT statement
+            params: Dictionary of parameter values
+
+        Returns:
+            Row dictionary or None
+        """
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params or {})
+        columns = [col[0] for col in cursor.description]
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            return None
+        return dict(zip(columns, row))
+
+    async def get_next_sequence(self, sequence_name: str) -> int:
+        """
+        Get next value from Oracle sequence within transaction.
+
+        Args:
+            sequence_name: Name of the sequence
+
+        Returns:
+            Next sequence value
+        """
+        cursor = self._conn.cursor()
+        cursor.execute(f"SELECT {sequence_name}.NEXTVAL FROM DUAL")
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            raise Exception(f"Failed to get sequence value: {sequence_name}")
+        return int(row[0])
+
+
 class DatabasePool:
     """
     Oracle connection pool manager.
@@ -149,6 +234,48 @@ class DatabasePool:
         except oracledb.Error as e:
             logger.error(f"Error acquiring connection: {e}")
             raise ConnectionError(f"Failed to acquire connection: {e}") from e
+        finally:
+            if conn is not None:
+                try:
+                    self._pool.release(conn)
+                except Exception as e:
+                    logger.error(f"Error releasing connection: {e}")
+
+    @asynccontextmanager
+    async def transaction(self):
+        """
+        Acquire a connection with transaction semantics.
+
+        Commits on successful exit, rolls back on exception.
+
+        Usage:
+            async with pool.transaction() as conn:
+                cursor = conn.cursor()
+                cursor.execute(...)
+                # auto-commits on exit, rolls back on exception
+
+        Yields:
+            TransactionConnection wrapper with execute method
+
+        Raises:
+            ConnectionError: If pool not initialized or acquire fails
+        """
+        if self._pool is None:
+            raise ConnectionError("Database pool not initialized")
+
+        conn = None
+        try:
+            conn = self._pool.acquire()
+            tx_conn = TransactionConnection(conn)
+            yield tx_conn
+            conn.commit()
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise
         finally:
             if conn is not None:
                 try:

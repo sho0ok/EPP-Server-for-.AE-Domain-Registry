@@ -18,6 +18,16 @@ DOMAIN_NS = "urn:ietf:params:xml:ns:domain-1.0"
 CONTACT_NS = "urn:ietf:params:xml:ns:contact-1.0"
 HOST_NS = "urn:ietf:params:xml:ns:host-1.0"
 
+# Extension Namespaces
+AEEXT_NS = "urn:X-ae:params:xml:ns:aeext-1.0"
+AREXT_NS = "urn:X-ar:params:xml:ns:arext-1.0"
+AUEXT_NS = "urn:X-au:params:xml:ns:auext-1.1"
+E164_NS = "urn:ietf:params:xml:ns:e164epp-1.0"
+SECDNS_NS = "urn:ietf:params:xml:ns:secDNS-1.1"
+IDN_NS = "urn:X-ar:params:xml:ns:idnadomain-1.0"
+VARIANT_NS = "urn:X-ar:params:xml:ns:variant-1.0"
+KV_NS = "urn:X-ar:params:xml:ns:kv-1.0"
+
 # Namespace declarations for XML output
 NSMAP = {
     None: EPP_NS,  # Default namespace
@@ -82,7 +92,8 @@ class ResponseBuilder:
         supported_versions: Optional[List[str]] = None,
         supported_languages: Optional[List[str]] = None,
         supported_objects: Optional[List[str]] = None,
-        supported_extensions: Optional[List[str]] = None
+        supported_extensions: Optional[List[str]] = None,
+        dcp_config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize response builder.
@@ -94,6 +105,12 @@ class ResponseBuilder:
             supported_languages: List of supported languages
             supported_objects: List of supported object URIs
             supported_extensions: List of supported extension URIs
+            dcp_config: Data Collection Policy configuration:
+                - access: "all", "none", "null", "personal", "personalAndOther", "other"
+                - purpose: list of "admin", "contact", "prov", "other"
+                - recipient: list of "ours", "other", "public", "same", "unrelated"
+                - retention: "business", "indefinite", "legal", "none", "stated"
+                - expiry: optional dict {"type": "absolute"|"relative", "value": str}
         """
         self.server_id = server_id
         self.roid_suffix = roid_suffix
@@ -103,6 +120,12 @@ class ResponseBuilder:
             DOMAIN_NS, CONTACT_NS, HOST_NS
         ]
         self.supported_extensions = supported_extensions or []
+        self.dcp_config = dcp_config or {
+            "access": "all",
+            "purpose": ["admin", "prov"],
+            "recipient": ["ours"],
+            "retention": "stated"
+        }
         self._sv_trid_counter = 0
 
     def generate_sv_trid(self) -> str:
@@ -151,18 +174,47 @@ class ResponseBuilder:
             for ext_uri in self.supported_extensions:
                 etree.SubElement(svc_ext, "extURI").text = ext_uri
 
-        # DCP (Data Collection Policy)
+        # DCP (Data Collection Policy) per RFC 5730
         dcp = etree.SubElement(greeting, "dcp")
+
+        # Access - describes the server's access to data
         access = etree.SubElement(dcp, "access")
-        etree.SubElement(access, "all")
+        access_type = self.dcp_config.get("access", "all")
+        if access_type == "personalAndOther":
+            etree.SubElement(access, "personalAndOther")
+        else:
+            etree.SubElement(access, access_type)
+
+        # Statement - describes data handling policy
         statement = etree.SubElement(dcp, "statement")
+
+        # Purpose - why data is collected
         purpose = etree.SubElement(statement, "purpose")
-        etree.SubElement(purpose, "admin")
-        etree.SubElement(purpose, "prov")
+        for p in self.dcp_config.get("purpose", ["admin", "prov"]):
+            etree.SubElement(purpose, p)
+
+        # Recipient - who receives the data
         recipient = etree.SubElement(statement, "recipient")
-        etree.SubElement(recipient, "ours")
+        for r in self.dcp_config.get("recipient", ["ours"]):
+            if r == "same":
+                # "same" recipient requires mandatory recDesc
+                same = etree.SubElement(recipient, "same")
+            else:
+                etree.SubElement(recipient, r)
+
+        # Retention - how long data is kept
         retention = etree.SubElement(statement, "retention")
-        etree.SubElement(retention, "stated")
+        retention_type = self.dcp_config.get("retention", "stated")
+        etree.SubElement(retention, retention_type)
+
+        # Optional expiry element
+        if "expiry" in self.dcp_config:
+            expiry = self.dcp_config["expiry"]
+            expiry_elem = etree.SubElement(statement, "expiry")
+            if expiry.get("type") == "absolute":
+                etree.SubElement(expiry_elem, "absolute").text = expiry.get("value", "")
+            elif expiry.get("type") == "relative":
+                etree.SubElement(expiry_elem, "relative").text = expiry.get("value", "")
 
         return etree.tostring(
             epp,
@@ -619,6 +671,50 @@ class ResponseBuilder:
         etree.SubElement(cre_data, "{%s}crDate" % CONTACT_NS).text = cr_date
         return cre_data
 
+    def build_contact_transfer_result(
+        self,
+        contact_id: str,
+        tr_status: str,
+        re_id: str,
+        re_date: str,
+        ac_id: str,
+        ac_date: str
+    ) -> etree._Element:
+        """
+        Build contact:transfer result data (trnData).
+
+        Per RFC 5733 section 3.1.4, the transfer response contains:
+        - id: Contact identifier
+        - trStatus: Transfer status (pending, clientApproved, clientRejected,
+                    clientCancelled, serverApproved, serverCancelled)
+        - reID: Identifier of the client that requested the transfer
+        - reDate: Date and time that the transfer was requested
+        - acID: Identifier of the client that should act upon the transfer request
+        - acDate: Date and time of a required or completed response
+
+        Args:
+            contact_id: Contact identifier
+            tr_status: Transfer status
+            re_id: Requesting client ID
+            re_date: Request date (ISO 8601 format)
+            ac_id: Acting client ID
+            ac_date: Action date (ISO 8601 format)
+
+        Returns:
+            contact:trnData element
+        """
+        trn_data = etree.Element(
+            "{%s}trnData" % CONTACT_NS,
+            nsmap={"contact": CONTACT_NS}
+        )
+        etree.SubElement(trn_data, "{%s}id" % CONTACT_NS).text = contact_id
+        etree.SubElement(trn_data, "{%s}trStatus" % CONTACT_NS).text = tr_status
+        etree.SubElement(trn_data, "{%s}reID" % CONTACT_NS).text = re_id
+        etree.SubElement(trn_data, "{%s}reDate" % CONTACT_NS).text = re_date
+        etree.SubElement(trn_data, "{%s}acID" % CONTACT_NS).text = ac_id
+        etree.SubElement(trn_data, "{%s}acDate" % CONTACT_NS).text = ac_date
+        return trn_data
+
     # Host response builders
 
     def build_host_check_result(
@@ -808,6 +904,566 @@ class ResponseBuilder:
         # Return the first one for now, or could create wrapper
         return extensions[0]
 
+    # =========================================================================
+    # AE Extension Response Builders
+    # =========================================================================
+
+    def build_ae_transfer_registrant_result(
+        self,
+        name: str,
+        ex_date: str
+    ) -> etree._Element:
+        """
+        Build aeext:rtrnData response for registrantTransfer.
+
+        Per aeext-1.0 schema, the response contains:
+        - name: Domain name
+        - exDate: New expiration date
+
+        Args:
+            name: Domain name
+            ex_date: New expiration date (ISO 8601 format)
+
+        Returns:
+            aeext:rtrnData element
+        """
+        rtrn_data = etree.Element(
+            "{%s}rtrnData" % AEEXT_NS,
+            nsmap={"aeext": AEEXT_NS}
+        )
+        etree.SubElement(rtrn_data, "{%s}name" % AEEXT_NS).text = name
+        etree.SubElement(rtrn_data, "{%s}exDate" % AEEXT_NS).text = ex_date
+        return rtrn_data
+
+    def build_ae_info_data(
+        self,
+        registrant_name: str,
+        eligibility_type: str,
+        registrant_id: Optional[str] = None,
+        registrant_id_type: Optional[str] = None,
+        eligibility_name: Optional[str] = None,
+        eligibility_id: Optional[str] = None,
+        eligibility_id_type: Optional[str] = None,
+        policy_reason: Optional[int] = None
+    ) -> etree._Element:
+        """
+        Build aeext:infData response extension for domain:info.
+
+        Per aeext-1.0.xsd, contains aeProperties with:
+        - registrantName: Required
+        - registrantID + type: Optional
+        - eligibilityType: Required
+        - eligibilityName: Optional
+        - eligibilityID + type: Optional
+        - policyReason: Optional (1-99)
+
+        Args:
+            registrant_name: Legal name of registrant
+            eligibility_type: Type of eligibility (e.g., "Trade License")
+            registrant_id: Optional registrant ID value
+            registrant_id_type: Optional registrant ID type (e.g., "Trade License")
+            eligibility_name: Optional eligibility name
+            eligibility_id: Optional eligibility ID value
+            eligibility_id_type: Optional eligibility ID type (e.g., "Trademark")
+            policy_reason: Optional policy reason (1-99)
+
+        Returns:
+            aeext:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % AEEXT_NS,
+            nsmap={"aeext": AEEXT_NS}
+        )
+
+        # aeProperties container
+        ae_props = etree.SubElement(inf_data, "{%s}aeProperties" % AEEXT_NS)
+
+        # registrantName (required)
+        etree.SubElement(ae_props, "{%s}registrantName" % AEEXT_NS).text = registrant_name
+
+        # registrantID (optional, with type attribute)
+        if registrant_id and registrant_id_type:
+            reg_id = etree.SubElement(ae_props, "{%s}registrantID" % AEEXT_NS)
+            reg_id.text = registrant_id
+            reg_id.set("type", registrant_id_type)
+
+        # eligibilityType (required)
+        etree.SubElement(ae_props, "{%s}eligibilityType" % AEEXT_NS).text = eligibility_type
+
+        # eligibilityName (optional)
+        if eligibility_name:
+            etree.SubElement(ae_props, "{%s}eligibilityName" % AEEXT_NS).text = eligibility_name
+
+        # eligibilityID (optional, with type attribute)
+        if eligibility_id and eligibility_id_type:
+            elig_id = etree.SubElement(ae_props, "{%s}eligibilityID" % AEEXT_NS)
+            elig_id.text = eligibility_id
+            elig_id.set("type", eligibility_id_type)
+
+        # policyReason (optional)
+        if policy_reason is not None:
+            etree.SubElement(ae_props, "{%s}policyReason" % AEEXT_NS).text = str(policy_reason)
+
+        return inf_data
+
+    # =========================================================================
+    # AR Extension Response Builders
+    # =========================================================================
+
+    def build_ar_undelete_result(
+        self,
+        name: str
+    ) -> etree._Element:
+        """
+        Build arext:undeleteData response for undelete command.
+
+        Args:
+            name: Domain name that was undeleted
+
+        Returns:
+            arext:undeleteData element
+        """
+        undelete_data = etree.Element(
+            "{%s}undeleteData" % AREXT_NS,
+            nsmap={"arext": AREXT_NS}
+        )
+        etree.SubElement(undelete_data, "{%s}name" % AREXT_NS).text = name
+        return undelete_data
+
+    def build_ar_unrenew_result(
+        self,
+        name: str,
+        ex_date: str
+    ) -> etree._Element:
+        """
+        Build arext:unrenewData response for unrenew command.
+
+        Args:
+            name: Domain name
+            ex_date: Reverted expiration date
+
+        Returns:
+            arext:unrenewData element
+        """
+        unrenew_data = etree.Element(
+            "{%s}unrenewData" % AREXT_NS,
+            nsmap={"arext": AREXT_NS}
+        )
+        etree.SubElement(unrenew_data, "{%s}name" % AREXT_NS).text = name
+        etree.SubElement(unrenew_data, "{%s}exDate" % AREXT_NS).text = ex_date
+        return unrenew_data
+
+    # =========================================================================
+    # AU Extension Response Builders
+    # =========================================================================
+
+    def build_au_transfer_registrant_result(
+        self,
+        name: str,
+        ex_date: str
+    ) -> etree._Element:
+        """
+        Build auext:rtrnData response for registrantTransfer.
+
+        Per auext-1.1 schema, the response contains:
+        - name: Domain name
+        - exDate: New expiration date
+
+        Args:
+            name: Domain name
+            ex_date: New expiration date (ISO 8601 format)
+
+        Returns:
+            auext:rtrnData element
+        """
+        rtrn_data = etree.Element(
+            "{%s}rtrnData" % AUEXT_NS,
+            nsmap={"auext": AUEXT_NS}
+        )
+        etree.SubElement(rtrn_data, "{%s}name" % AUEXT_NS).text = name
+        etree.SubElement(rtrn_data, "{%s}exDate" % AUEXT_NS).text = ex_date
+        return rtrn_data
+
+    def build_au_info_data(
+        self,
+        registrant_name: str,
+        eligibility_type: str,
+        policy_reason: int,
+        registrant_id: Optional[str] = None,
+        registrant_id_type: Optional[str] = None,
+        eligibility_name: Optional[str] = None,
+        eligibility_id: Optional[str] = None,
+        eligibility_id_type: Optional[str] = None
+    ) -> etree._Element:
+        """
+        Build auext:infData response extension for domain:info.
+
+        Per auext-1.1.xsd, contains auProperties with:
+        - registrantName: Required
+        - registrantID + type: Optional
+        - eligibilityType: Required
+        - eligibilityName: Optional
+        - eligibilityID + type: Optional
+        - policyReason: Required (1-106)
+
+        Args:
+            registrant_name: Legal name of registrant
+            eligibility_type: Type of eligibility (e.g., "Company")
+            policy_reason: Policy reason (1-106)
+            registrant_id: Optional registrant ID value
+            registrant_id_type: Optional registrant ID type (ACN, ABN, OTHER)
+            eligibility_name: Optional eligibility name
+            eligibility_id: Optional eligibility ID value
+            eligibility_id_type: Optional eligibility ID type
+
+        Returns:
+            auext:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % AUEXT_NS,
+            nsmap={"auext": AUEXT_NS}
+        )
+
+        # auProperties container
+        au_props = etree.SubElement(inf_data, "{%s}auProperties" % AUEXT_NS)
+
+        # registrantName (required)
+        etree.SubElement(au_props, "{%s}registrantName" % AUEXT_NS).text = registrant_name
+
+        # registrantID (optional, with type attribute)
+        if registrant_id and registrant_id_type:
+            reg_id = etree.SubElement(au_props, "{%s}registrantID" % AUEXT_NS)
+            reg_id.text = registrant_id
+            reg_id.set("type", registrant_id_type)
+
+        # eligibilityType (required)
+        etree.SubElement(au_props, "{%s}eligibilityType" % AUEXT_NS).text = eligibility_type
+
+        # eligibilityName (optional)
+        if eligibility_name:
+            etree.SubElement(au_props, "{%s}eligibilityName" % AUEXT_NS).text = eligibility_name
+
+        # eligibilityID (optional, with type attribute)
+        if eligibility_id and eligibility_id_type:
+            elig_id = etree.SubElement(au_props, "{%s}eligibilityID" % AUEXT_NS)
+            elig_id.text = eligibility_id
+            elig_id.set("type", eligibility_id_type)
+
+        # policyReason (required)
+        etree.SubElement(au_props, "{%s}policyReason" % AUEXT_NS).text = str(policy_reason)
+
+        return inf_data
+
+    # =========================================================================
+    # E.164/ENUM Extension Response Builders
+    # =========================================================================
+
+    def build_e164_info_data(
+        self,
+        naptr_records: List[Dict[str, Any]]
+    ) -> etree._Element:
+        """
+        Build e164:infData response extension for domain:info.
+
+        Per e164epp-1.0.xsd (RFC 4114), infData contains:
+        - naptr: One or more NAPTR records
+
+        Args:
+            naptr_records: List of NAPTR record dicts with keys:
+                - order: unsigned short (required)
+                - pref: unsigned short (required)
+                - flags: single char (optional)
+                - svc: service field (required)
+                - regex: regular expression (optional)
+                - repl: replacement domain (optional)
+
+        Returns:
+            e164:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % E164_NS,
+            nsmap={"e164": E164_NS}
+        )
+
+        for record in naptr_records:
+            naptr = self._build_e164_naptr(record)
+            inf_data.append(naptr)
+
+        return inf_data
+
+    def _build_e164_naptr(self, record: Dict[str, Any]) -> etree._Element:
+        """
+        Build a single e164:naptr element.
+
+        Args:
+            record: Dict with order, pref, flags, svc, regex, repl
+
+        Returns:
+            e164:naptr element
+        """
+        naptr = etree.Element("{%s}naptr" % E164_NS)
+
+        # order (required)
+        if "order" in record:
+            etree.SubElement(naptr, "{%s}order" % E164_NS).text = str(record["order"])
+
+        # pref (required)
+        if "pref" in record:
+            etree.SubElement(naptr, "{%s}pref" % E164_NS).text = str(record["pref"])
+
+        # flags (optional)
+        if record.get("flags"):
+            etree.SubElement(naptr, "{%s}flags" % E164_NS).text = record["flags"]
+
+        # svc (required)
+        if "svc" in record:
+            etree.SubElement(naptr, "{%s}svc" % E164_NS).text = record["svc"]
+
+        # regex (optional)
+        if record.get("regex"):
+            etree.SubElement(naptr, "{%s}regex" % E164_NS).text = record["regex"]
+
+        # repl (optional)
+        if record.get("repl"):
+            etree.SubElement(naptr, "{%s}repl" % E164_NS).text = record["repl"]
+
+        return naptr
+
+    # =========================================================================
+    # secDNS (DNSSEC) Extension Response Builders
+    # =========================================================================
+
+    def build_secdns_info_data(
+        self,
+        ds_data: List[Dict[str, Any]] = None,
+        key_data: List[Dict[str, Any]] = None,
+        max_sig_life: int = None
+    ) -> etree._Element:
+        """
+        Build secDNS:infData response extension for domain:info.
+
+        Per secDNS-1.1.xsd, infData contains:
+        - maxSigLife: Optional maximum signature lifetime
+        - dsData: DS records (delegation signer)
+        - keyData: DNSKEY records
+
+        Args:
+            ds_data: List of DS record dicts
+            key_data: List of Key record dicts
+            max_sig_life: Optional max signature lifetime in seconds
+
+        Returns:
+            secDNS:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % SECDNS_NS,
+            nsmap={"secDNS": SECDNS_NS}
+        )
+
+        if max_sig_life is not None:
+            etree.SubElement(inf_data, "{%s}maxSigLife" % SECDNS_NS).text = str(max_sig_life)
+
+        if ds_data:
+            for ds in ds_data:
+                ds_elem = self._build_secdns_ds_data(ds)
+                inf_data.append(ds_elem)
+
+        if key_data:
+            for key in key_data:
+                key_elem = self._build_secdns_key_data(key)
+                inf_data.append(key_elem)
+
+        return inf_data
+
+    def _build_secdns_ds_data(self, ds: Dict[str, Any]) -> etree._Element:
+        """Build a single secDNS:dsData element."""
+        ds_elem = etree.Element("{%s}dsData" % SECDNS_NS)
+
+        etree.SubElement(ds_elem, "{%s}keyTag" % SECDNS_NS).text = str(ds.get("keyTag", 0))
+        etree.SubElement(ds_elem, "{%s}alg" % SECDNS_NS).text = str(ds.get("alg", 0))
+        etree.SubElement(ds_elem, "{%s}digestType" % SECDNS_NS).text = str(ds.get("digestType", 0))
+        etree.SubElement(ds_elem, "{%s}digest" % SECDNS_NS).text = ds.get("digest", "")
+
+        # Optional nested keyData
+        if ds.get("keyData"):
+            key_elem = self._build_secdns_key_data(ds["keyData"])
+            ds_elem.append(key_elem)
+
+        return ds_elem
+
+    def _build_secdns_key_data(self, key: Dict[str, Any]) -> etree._Element:
+        """Build a single secDNS:keyData element."""
+        key_elem = etree.Element("{%s}keyData" % SECDNS_NS)
+
+        etree.SubElement(key_elem, "{%s}flags" % SECDNS_NS).text = str(key.get("flags", 0))
+        etree.SubElement(key_elem, "{%s}protocol" % SECDNS_NS).text = str(key.get("protocol", 3))
+        etree.SubElement(key_elem, "{%s}alg" % SECDNS_NS).text = str(key.get("alg", 0))
+        etree.SubElement(key_elem, "{%s}pubKey" % SECDNS_NS).text = key.get("pubKey", "")
+
+        return key_elem
+
+    # =========================================================================
+    # IDN Extension Response Builders
+    # =========================================================================
+
+    def build_idn_info_data(
+        self,
+        user_form: str,
+        canonical_form: str,
+        language: str
+    ) -> etree._Element:
+        """
+        Build idnadomain:infData response extension for domain:info.
+
+        Per idnadomain-1.0.xsd:
+        - userForm: Unicode representation with language attribute
+        - canonicalForm: ACE/Punycode representation
+
+        Args:
+            user_form: Unicode domain form
+            canonical_form: ACE/Punycode form
+            language: BCP 47 language tag
+
+        Returns:
+            idnadomain:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % IDN_NS,
+            nsmap={"idnadomain": IDN_NS}
+        )
+
+        user_elem = etree.SubElement(inf_data, "{%s}userForm" % IDN_NS)
+        user_elem.text = user_form
+        user_elem.set("language", language)
+
+        etree.SubElement(inf_data, "{%s}canonicalForm" % IDN_NS).text = canonical_form
+
+        return inf_data
+
+    def build_idn_create_data(
+        self,
+        user_form: str,
+        canonical_form: str,
+        language: str
+    ) -> etree._Element:
+        """
+        Build idnadomain:creData response extension for domain:create.
+
+        Args:
+            user_form: Unicode domain form
+            canonical_form: ACE/Punycode form
+            language: BCP 47 language tag
+
+        Returns:
+            idnadomain:creData element
+        """
+        cre_data = etree.Element(
+            "{%s}creData" % IDN_NS,
+            nsmap={"idnadomain": IDN_NS}
+        )
+
+        user_elem = etree.SubElement(cre_data, "{%s}userForm" % IDN_NS)
+        user_elem.text = user_form
+        user_elem.set("language", language)
+
+        etree.SubElement(cre_data, "{%s}canonicalForm" % IDN_NS).text = canonical_form
+
+        return cre_data
+
+    # =========================================================================
+    # Variant Extension Response Builders
+    # =========================================================================
+
+    def build_variant_info_data(
+        self,
+        variants: List[Dict[str, str]]
+    ) -> etree._Element:
+        """
+        Build variant:infData response extension for domain:info.
+
+        Per variant-1.0.xsd:
+        - variant: List of variant domains with userForm attribute
+
+        Args:
+            variants: List of dicts with 'name' (DNS form) and 'userForm' keys
+
+        Returns:
+            variant:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % VARIANT_NS,
+            nsmap={"variant": VARIANT_NS}
+        )
+
+        for var in variants:
+            var_elem = etree.SubElement(inf_data, "{%s}variant" % VARIANT_NS)
+            var_elem.text = var.get("name", "")
+            var_elem.set("userForm", var.get("userForm", ""))
+
+        return inf_data
+
+    def build_variant_create_data(
+        self,
+        variants: List[Dict[str, str]]
+    ) -> etree._Element:
+        """
+        Build variant:creData response extension for domain:create.
+
+        Args:
+            variants: List of dicts with 'name' and 'userForm' keys
+
+        Returns:
+            variant:creData element
+        """
+        cre_data = etree.Element(
+            "{%s}creData" % VARIANT_NS,
+            nsmap={"variant": VARIANT_NS}
+        )
+
+        for var in variants:
+            var_elem = etree.SubElement(cre_data, "{%s}variant" % VARIANT_NS)
+            var_elem.text = var.get("name", "")
+            var_elem.set("userForm", var.get("userForm", ""))
+
+        return cre_data
+
+    # =========================================================================
+    # KV Extension Response Builders
+    # =========================================================================
+
+    def build_kv_info_data(
+        self,
+        kvlists: List[Dict[str, Any]]
+    ) -> etree._Element:
+        """
+        Build kv:infData response extension for domain:info.
+
+        Per kv-1.0.xsd:
+        - kvlist: Named list with key-value items
+
+        Args:
+            kvlists: List of dicts with 'name' and 'items' keys
+                     items is list of {'key': str, 'value': str}
+
+        Returns:
+            kv:infData element
+        """
+        inf_data = etree.Element(
+            "{%s}infData" % KV_NS,
+            nsmap={"kv": KV_NS}
+        )
+
+        for kvlist in kvlists:
+            list_elem = etree.SubElement(inf_data, "{%s}kvlist" % KV_NS)
+            list_elem.set("name", kvlist.get("name", ""))
+
+            for item in kvlist.get("items", []):
+                item_elem = etree.SubElement(list_elem, "{%s}item" % KV_NS)
+                item_elem.set("key", item.get("key", ""))
+                item_elem.text = item.get("value", "")
+
+        return inf_data
+
 
 # Global response builder instance
 _builder: Optional[ResponseBuilder] = None
@@ -818,7 +1474,19 @@ def initialize_response_builder(config: Dict[str, Any]) -> ResponseBuilder:
     Initialize global response builder from config.
 
     Args:
-        config: EPP configuration dictionary
+        config: EPP configuration dictionary with optional keys:
+            - server_id: Server identifier
+            - roid_suffix: ROID suffix
+            - supported_versions: List of EPP versions
+            - supported_languages: List of languages
+            - supported_objects: List of object URIs
+            - supported_extensions: List of extension URIs
+            - dcp: Data Collection Policy config dict:
+                - access: "all", "none", "null", "personal", "personalAndOther", "other"
+                - purpose: list of "admin", "contact", "prov", "other"
+                - recipient: list of "ours", "other", "public", "same", "unrelated"
+                - retention: "business", "indefinite", "legal", "none", "stated"
+                - expiry: optional {"type": "absolute"|"relative", "value": str}
 
     Returns:
         Initialized ResponseBuilder instance
@@ -833,7 +1501,8 @@ def initialize_response_builder(config: Dict[str, Any]) -> ResponseBuilder:
         supported_objects=config.get("supported_objects", [
             DOMAIN_NS, CONTACT_NS, HOST_NS
         ]),
-        supported_extensions=config.get("supported_extensions", [])
+        supported_extensions=config.get("supported_extensions", []),
+        dcp_config=config.get("dcp")
     )
 
     return _builder

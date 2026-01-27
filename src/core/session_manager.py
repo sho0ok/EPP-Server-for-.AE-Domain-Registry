@@ -6,16 +6,20 @@ Manages EPP sessions including:
 - Connection logging
 - Authentication state
 - Session validation and cleanup
+- Session statistics
+- Rate limiting integration
 """
 
 import logging
 import socket
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.database.repositories.transaction_repo import get_transaction_repo, TransactionRepository
 from src.database.repositories.account_repo import get_account_repo, AccountRepository
+from src.utils.rate_limiter import SessionStats, get_rate_limiter
 
 logger = logging.getLogger("epp.session")
 
@@ -53,6 +57,31 @@ class SessionInfo:
     # Statistics
     command_count: int = 0
     login_failures: int = 0
+
+    # Detailed session statistics
+    stats: SessionStats = field(default_factory=SessionStats)
+
+    def record_command(self, command_type: str, success: bool = True) -> None:
+        """Record a command execution with statistics."""
+        self.command_count += 1
+        self.last_activity = datetime.utcnow()
+        self.stats.record_command(command_type, success)
+
+    def record_bytes(self, sent: int = 0, received: int = 0) -> None:
+        """Record bytes transferred."""
+        self.stats.record_bytes(sent, received)
+
+    def get_session_stats(self) -> Dict[str, Any]:
+        """Get comprehensive session statistics."""
+        return {
+            "session_id": self.session_id,
+            "client_id": self.client_id,
+            "client_ip": self.client_ip,
+            "authenticated": self.authenticated,
+            "login_time": self.login_time.isoformat() if self.login_time else None,
+            "login_failures": self.login_failures,
+            **self.stats.to_dict()
+        }
 
 
 class SessionManager:
@@ -397,6 +426,45 @@ class SessionManager:
             audit_log=audit_log,
             application_time=app_time
         )
+
+    async def check_rate_limit(
+        self,
+        session: SessionInfo
+    ) -> tuple:
+        """
+        Check if the session is within rate limits.
+
+        Args:
+            session: Session info object
+
+        Returns:
+            Tuple of (allowed, reason if not allowed)
+        """
+        rate_limiter = get_rate_limiter()
+        if rate_limiter is None:
+            return True, None
+
+        return await rate_limiter.check_rate_limit(
+            client_ip=session.client_ip,
+            account_id=session.account_id
+        )
+
+    async def record_rate_limit(
+        self,
+        session: SessionInfo
+    ) -> None:
+        """
+        Record a command for rate limiting tracking.
+
+        Args:
+            session: Session info object
+        """
+        rate_limiter = get_rate_limiter()
+        if rate_limiter is not None:
+            await rate_limiter.record_command(
+                client_ip=session.client_ip,
+                account_id=session.account_id
+            )
 
     def is_authenticated(self, session: SessionInfo) -> bool:
         """Check if session is authenticated."""

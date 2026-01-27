@@ -370,6 +370,1028 @@ class ExtensionRepository:
 
         return result
 
+    # =========================================================================
+    # AE Extension Registrant Operations
+    # =========================================================================
+
+    async def get_ae_registrant_data(
+        self,
+        domain_roid: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get AE extension registrant data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+
+        Returns:
+            Dict with AE properties or None if not found
+        """
+        sql = """
+            SELECT
+                ar.REGISTRANT_NAME,
+                ar.REGISTRANT_ID,
+                ar.REGISTRANT_ID_TYPE,
+                ar.ELIGIBILITY_TYPE,
+                ar.ELIGIBILITY_NAME,
+                ar.ELIGIBILITY_ID,
+                ar.ELIGIBILITY_ID_TYPE,
+                ar.POLICY_REASON,
+                ar.EXPLANATION,
+                ar.CREATE_DATE,
+                ar.UPDATE_DATE
+            FROM AE_REGISTRANT_DATA ar
+            WHERE ar.DOM_ROID = :domain_roid
+        """
+        return await self.pool.query_one(sql, {"domain_roid": domain_roid})
+
+    async def update_ae_registrant_data(
+        self,
+        domain_roid: str,
+        user_id: int,
+        registrant_name: str,
+        explanation: str,
+        eligibility_type: Optional[str] = None,
+        policy_reason: Optional[int] = None,
+        registrant_id: Optional[str] = None,
+        registrant_id_type: Optional[str] = None,
+        eligibility_name: Optional[str] = None,
+        eligibility_id: Optional[str] = None,
+        eligibility_id_type: Optional[str] = None
+    ) -> bool:
+        """
+        Update AE extension registrant data for a domain (ModifyRegistrant).
+
+        This corrects eligibility data without changing the legal registrant.
+
+        Args:
+            domain_roid: Domain ROID
+            user_id: User performing the update
+            registrant_name: Legal name of registrant
+            explanation: Explanation for the change (required, max 1000 chars)
+            eligibility_type: Type of eligibility
+            policy_reason: Policy reason (1-99)
+            registrant_id: Registrant ID value
+            registrant_id_type: Registrant ID type
+            eligibility_name: Eligibility name
+            eligibility_id: Eligibility ID value
+            eligibility_id_type: Eligibility ID type
+
+        Returns:
+            True if updated successfully
+        """
+        # Check if record exists
+        existing = await self.get_ae_registrant_data(domain_roid)
+
+        if existing:
+            # Update existing record
+            sql = """
+                UPDATE AE_REGISTRANT_DATA
+                SET REGISTRANT_NAME = :registrant_name,
+                    ELIGIBILITY_TYPE = COALESCE(:eligibility_type, ELIGIBILITY_TYPE),
+                    POLICY_REASON = COALESCE(:policy_reason, POLICY_REASON),
+                    REGISTRANT_ID = COALESCE(:registrant_id, REGISTRANT_ID),
+                    REGISTRANT_ID_TYPE = COALESCE(:registrant_id_type, REGISTRANT_ID_TYPE),
+                    ELIGIBILITY_NAME = COALESCE(:eligibility_name, ELIGIBILITY_NAME),
+                    ELIGIBILITY_ID = COALESCE(:eligibility_id, ELIGIBILITY_ID),
+                    ELIGIBILITY_ID_TYPE = COALESCE(:eligibility_id_type, ELIGIBILITY_ID_TYPE),
+                    EXPLANATION = :explanation,
+                    UPDATE_DATE = SYSDATE,
+                    UPDATE_USER_ID = :user_id
+                WHERE DOM_ROID = :domain_roid
+            """
+        else:
+            # Insert new record
+            sql = """
+                INSERT INTO AE_REGISTRANT_DATA (
+                    AE_REG_DATA_ID, DOM_ROID, REGISTRANT_NAME, REGISTRANT_ID,
+                    REGISTRANT_ID_TYPE, ELIGIBILITY_TYPE, ELIGIBILITY_NAME,
+                    ELIGIBILITY_ID, ELIGIBILITY_ID_TYPE, POLICY_REASON,
+                    EXPLANATION, CREATE_DATE, CREATE_USER_ID, UPDATE_DATE, UPDATE_USER_ID
+                ) VALUES (
+                    AE_REG_DATA_SEQ.NEXTVAL, :domain_roid, :registrant_name, :registrant_id,
+                    :registrant_id_type, :eligibility_type, :eligibility_name,
+                    :eligibility_id, :eligibility_id_type, :policy_reason,
+                    :explanation, SYSDATE, :user_id, SYSDATE, :user_id
+                )
+            """
+
+        result = await self.pool.execute(sql, {
+            "domain_roid": domain_roid,
+            "user_id": user_id,
+            "registrant_name": registrant_name,
+            "explanation": explanation,
+            "eligibility_type": eligibility_type,
+            "policy_reason": policy_reason,
+            "registrant_id": registrant_id,
+            "registrant_id_type": registrant_id_type,
+            "eligibility_name": eligibility_name,
+            "eligibility_id": eligibility_id,
+            "eligibility_id_type": eligibility_id_type
+        })
+
+        # Log the modification
+        await self._log_ae_registrant_change(
+            domain_roid=domain_roid,
+            user_id=user_id,
+            change_type="MODIFY",
+            explanation=explanation
+        )
+
+        return result > 0
+
+    async def transfer_ae_registrant(
+        self,
+        domain_roid: str,
+        domain_name: str,
+        account_id: int,
+        user_id: int,
+        registrant_name: str,
+        explanation: str,
+        eligibility_type: str,
+        policy_reason: int,
+        period: int = 1,
+        period_unit: str = "y",
+        registrant_id: Optional[str] = None,
+        registrant_id_type: Optional[str] = None,
+        eligibility_name: Optional[str] = None,
+        eligibility_id: Optional[str] = None,
+        eligibility_id_type: Optional[str] = None,
+        rate: Decimal = Decimal("0")
+    ) -> Dict[str, Any]:
+        """
+        Transfer domain to new legal registrant (RegistrantTransfer).
+
+        This changes legal ownership and:
+        - Sets new validity period starting from transfer completion
+        - Charges create fee to the requesting client
+
+        Args:
+            domain_roid: Domain ROID
+            domain_name: Domain name
+            account_id: Account ID performing the transfer
+            user_id: User performing the transfer
+            registrant_name: New legal registrant name
+            explanation: Explanation for the transfer
+            eligibility_type: Type of eligibility (required)
+            policy_reason: Policy reason (1-99, required)
+            period: Validity period (default 1)
+            period_unit: Period unit - 'y' for years, 'm' for months (default 'y')
+            registrant_id: Registrant ID value
+            registrant_id_type: Registrant ID type
+            eligibility_name: Eligibility name
+            eligibility_id: Eligibility ID value
+            eligibility_id_type: Eligibility ID type
+            rate: Fee to charge
+
+        Returns:
+            Dict with exDate (new expiration date)
+        """
+        # Calculate new expiry date
+        if period_unit == "y":
+            years = period
+            months = 0
+        else:
+            years = period // 12
+            months = period % 12
+
+        # Update AE registrant data with new owner
+        await self.update_ae_registrant_data(
+            domain_roid=domain_roid,
+            user_id=user_id,
+            registrant_name=registrant_name,
+            explanation=explanation,
+            eligibility_type=eligibility_type,
+            policy_reason=policy_reason,
+            registrant_id=registrant_id,
+            registrant_id_type=registrant_id_type,
+            eligibility_name=eligibility_name,
+            eligibility_id=eligibility_id,
+            eligibility_id_type=eligibility_id_type
+        )
+
+        # Update domain with new expiry date (starting from now)
+        update_domain_sql = """
+            UPDATE DOMAINS
+            SET EXPIRY_DATE = ADD_MONTHS(SYSDATE, :total_months),
+                UPDATE_DATE = SYSDATE,
+                UPDATE_USER_ID = :user_id
+            WHERE ROID = :domain_roid
+            RETURNING TO_CHAR(EXPIRY_DATE, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"') INTO :new_ex_date
+        """
+        total_months = years * 12 + months
+
+        # Execute update and get new expiry date
+        new_ex_date_sql = """
+            SELECT TO_CHAR(
+                ADD_MONTHS(SYSDATE, :total_months),
+                'YYYY-MM-DD"T"HH24:MI:SS".0Z"'
+            ) AS ex_date
+            FROM DUAL
+        """
+        date_result = await self.pool.query_one(new_ex_date_sql, {"total_months": total_months})
+        new_ex_date = date_result["ex_date"] if date_result else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0Z")
+
+        # Update domain
+        await self.pool.execute(
+            """
+            UPDATE DOMAINS
+            SET EXPIRY_DATE = ADD_MONTHS(SYSDATE, :total_months),
+                UPDATE_DATE = SYSDATE,
+                UPDATE_USER_ID = :user_id
+            WHERE ROID = :domain_roid
+            """,
+            {"total_months": total_months, "user_id": user_id, "domain_roid": domain_roid}
+        )
+
+        # Charge create fee
+        if rate > 0:
+            await self._charge_registrant_transfer_fee(
+                account_id=account_id,
+                domain_name=domain_name,
+                amount=rate
+            )
+
+        # Log the transfer
+        await self._log_ae_registrant_change(
+            domain_roid=domain_roid,
+            user_id=user_id,
+            change_type="TRANSFER",
+            explanation=explanation
+        )
+
+        return {"exDate": new_ex_date}
+
+    async def _log_ae_registrant_change(
+        self,
+        domain_roid: str,
+        user_id: int,
+        change_type: str,
+        explanation: str
+    ) -> None:
+        """Log AE registrant change for audit trail."""
+        sql = """
+            INSERT INTO AE_REGISTRANT_HISTORY (
+                AE_REG_HIST_ID, DOM_ROID, CHANGE_TYPE, EXPLANATION,
+                CHANGE_DATE, CHANGE_USER_ID
+            ) VALUES (
+                AE_REG_HIST_SEQ.NEXTVAL, :domain_roid, :change_type, :explanation,
+                SYSDATE, :user_id
+            )
+        """
+        try:
+            await self.pool.execute(sql, {
+                "domain_roid": domain_roid,
+                "change_type": change_type,
+                "explanation": explanation,
+                "user_id": user_id
+            })
+        except Exception as e:
+            # Log but don't fail the main operation
+            logger.warning(f"Failed to log AE registrant change: {e}")
+
+    async def _charge_registrant_transfer_fee(
+        self,
+        account_id: int,
+        domain_name: str,
+        amount: Decimal
+    ) -> None:
+        """Charge fee for registrant transfer."""
+        sql = """
+            INSERT INTO ACCOUNT_TRANSACTIONS (
+                TRANSACTION_ID, ACCOUNT_ID, TRANSACTION_TYPE, AMOUNT,
+                DESCRIPTION, TRANSACTION_DATE
+            ) VALUES (
+                ACCOUNT_TXN_SEQ.NEXTVAL, :account_id, 'REGISTRANT_TRANSFER', :amount,
+                :description, SYSDATE
+            )
+        """
+        await self.pool.execute(sql, {
+            "account_id": account_id,
+            "amount": -amount,  # Negative for charge
+            "description": f"Registrant transfer fee for {domain_name}"
+        })
+
+        # Update account balance
+        await self.pool.execute(
+            "UPDATE ACCOUNTS SET BALANCE = BALANCE - :amount WHERE ACCOUNT_ID = :account_id",
+            {"amount": amount, "account_id": account_id}
+        )
+
+    # =========================================================================
+    # AU Extension Registrant Operations
+    # =========================================================================
+
+    async def get_au_registrant_data(
+        self,
+        domain_roid: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get AU extension registrant data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+
+        Returns:
+            Dict with AU properties or None if not found
+        """
+        sql = """
+            SELECT
+                ar.REGISTRANT_NAME,
+                ar.REGISTRANT_ID,
+                ar.REGISTRANT_ID_TYPE,
+                ar.ELIGIBILITY_TYPE,
+                ar.ELIGIBILITY_NAME,
+                ar.ELIGIBILITY_ID,
+                ar.ELIGIBILITY_ID_TYPE,
+                ar.POLICY_REASON,
+                ar.EXPLANATION,
+                ar.CREATE_DATE,
+                ar.UPDATE_DATE
+            FROM AU_REGISTRANT_DATA ar
+            WHERE ar.DOM_ROID = :domain_roid
+        """
+        return await self.pool.query_one(sql, {"domain_roid": domain_roid})
+
+    async def update_au_registrant_data(
+        self,
+        domain_roid: str,
+        user_id: int,
+        registrant_name: str,
+        explanation: str,
+        eligibility_type: str,
+        policy_reason: int,
+        registrant_id: Optional[str] = None,
+        registrant_id_type: Optional[str] = None,
+        eligibility_name: Optional[str] = None,
+        eligibility_id: Optional[str] = None,
+        eligibility_id_type: Optional[str] = None
+    ) -> bool:
+        """
+        Update AU extension registrant data for a domain (ModifyRegistrant).
+
+        This corrects eligibility data without changing the legal registrant.
+
+        Args:
+            domain_roid: Domain ROID
+            user_id: User performing the update
+            registrant_name: Legal name of registrant
+            explanation: Explanation for the change (required, max 1000 chars)
+            eligibility_type: Type of eligibility (required)
+            policy_reason: Policy reason (1-106, required)
+            registrant_id: Registrant ID value
+            registrant_id_type: Registrant ID type (ACN, ABN, OTHER)
+            eligibility_name: Eligibility name
+            eligibility_id: Eligibility ID value
+            eligibility_id_type: Eligibility ID type
+
+        Returns:
+            True if updated successfully
+        """
+        # Check if record exists
+        existing = await self.get_au_registrant_data(domain_roid)
+
+        if existing:
+            # Update existing record
+            sql = """
+                UPDATE AU_REGISTRANT_DATA
+                SET REGISTRANT_NAME = :registrant_name,
+                    ELIGIBILITY_TYPE = :eligibility_type,
+                    POLICY_REASON = :policy_reason,
+                    REGISTRANT_ID = COALESCE(:registrant_id, REGISTRANT_ID),
+                    REGISTRANT_ID_TYPE = COALESCE(:registrant_id_type, REGISTRANT_ID_TYPE),
+                    ELIGIBILITY_NAME = COALESCE(:eligibility_name, ELIGIBILITY_NAME),
+                    ELIGIBILITY_ID = COALESCE(:eligibility_id, ELIGIBILITY_ID),
+                    ELIGIBILITY_ID_TYPE = COALESCE(:eligibility_id_type, ELIGIBILITY_ID_TYPE),
+                    EXPLANATION = :explanation,
+                    UPDATE_DATE = SYSDATE,
+                    UPDATE_USER_ID = :user_id
+                WHERE DOM_ROID = :domain_roid
+            """
+        else:
+            # Insert new record
+            sql = """
+                INSERT INTO AU_REGISTRANT_DATA (
+                    AU_REG_DATA_ID, DOM_ROID, REGISTRANT_NAME, REGISTRANT_ID,
+                    REGISTRANT_ID_TYPE, ELIGIBILITY_TYPE, ELIGIBILITY_NAME,
+                    ELIGIBILITY_ID, ELIGIBILITY_ID_TYPE, POLICY_REASON,
+                    EXPLANATION, CREATE_DATE, CREATE_USER_ID, UPDATE_DATE, UPDATE_USER_ID
+                ) VALUES (
+                    AU_REG_DATA_SEQ.NEXTVAL, :domain_roid, :registrant_name, :registrant_id,
+                    :registrant_id_type, :eligibility_type, :eligibility_name,
+                    :eligibility_id, :eligibility_id_type, :policy_reason,
+                    :explanation, SYSDATE, :user_id, SYSDATE, :user_id
+                )
+            """
+
+        result = await self.pool.execute(sql, {
+            "domain_roid": domain_roid,
+            "user_id": user_id,
+            "registrant_name": registrant_name,
+            "explanation": explanation,
+            "eligibility_type": eligibility_type,
+            "policy_reason": policy_reason,
+            "registrant_id": registrant_id,
+            "registrant_id_type": registrant_id_type,
+            "eligibility_name": eligibility_name,
+            "eligibility_id": eligibility_id,
+            "eligibility_id_type": eligibility_id_type
+        })
+
+        # Log the modification
+        await self._log_au_registrant_change(
+            domain_roid=domain_roid,
+            user_id=user_id,
+            change_type="MODIFY",
+            explanation=explanation
+        )
+
+        return result > 0
+
+    async def transfer_au_registrant(
+        self,
+        domain_roid: str,
+        domain_name: str,
+        account_id: int,
+        user_id: int,
+        registrant_name: str,
+        explanation: str,
+        eligibility_type: str,
+        policy_reason: int,
+        period: int = 1,
+        period_unit: str = "y",
+        registrant_id: Optional[str] = None,
+        registrant_id_type: Optional[str] = None,
+        eligibility_name: Optional[str] = None,
+        eligibility_id: Optional[str] = None,
+        eligibility_id_type: Optional[str] = None,
+        rate: Decimal = Decimal("0")
+    ) -> Dict[str, Any]:
+        """
+        Transfer domain to new legal registrant (RegistrantTransfer) for .au.
+
+        This changes legal ownership and:
+        - Sets new validity period starting from transfer completion
+        - Charges create fee to the requesting client
+
+        Args:
+            domain_roid: Domain ROID
+            domain_name: Domain name
+            account_id: Account ID performing the transfer
+            user_id: User performing the transfer
+            registrant_name: New legal registrant name
+            explanation: Explanation for the transfer
+            eligibility_type: Type of eligibility (required)
+            policy_reason: Policy reason (1-106, required)
+            period: Validity period (default 1)
+            period_unit: Period unit - 'y' for years, 'm' for months (default 'y')
+            registrant_id: Registrant ID value
+            registrant_id_type: Registrant ID type
+            eligibility_name: Eligibility name
+            eligibility_id: Eligibility ID value
+            eligibility_id_type: Eligibility ID type
+            rate: Fee to charge
+
+        Returns:
+            Dict with exDate (new expiration date)
+        """
+        # Calculate new expiry date
+        if period_unit == "y":
+            years = period
+            months = 0
+        else:
+            years = period // 12
+            months = period % 12
+
+        # Update AU registrant data with new owner
+        await self.update_au_registrant_data(
+            domain_roid=domain_roid,
+            user_id=user_id,
+            registrant_name=registrant_name,
+            explanation=explanation,
+            eligibility_type=eligibility_type,
+            policy_reason=policy_reason,
+            registrant_id=registrant_id,
+            registrant_id_type=registrant_id_type,
+            eligibility_name=eligibility_name,
+            eligibility_id=eligibility_id,
+            eligibility_id_type=eligibility_id_type
+        )
+
+        # Calculate total months for new expiry
+        total_months = years * 12 + months
+
+        # Get new expiry date
+        new_ex_date_sql = """
+            SELECT TO_CHAR(
+                ADD_MONTHS(SYSDATE, :total_months),
+                'YYYY-MM-DD"T"HH24:MI:SS".0Z"'
+            ) AS ex_date
+            FROM DUAL
+        """
+        date_result = await self.pool.query_one(new_ex_date_sql, {"total_months": total_months})
+        new_ex_date = date_result["ex_date"] if date_result else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0Z")
+
+        # Update domain with new expiry date
+        await self.pool.execute(
+            """
+            UPDATE DOMAINS
+            SET EXPIRY_DATE = ADD_MONTHS(SYSDATE, :total_months),
+                UPDATE_DATE = SYSDATE,
+                UPDATE_USER_ID = :user_id
+            WHERE ROID = :domain_roid
+            """,
+            {"total_months": total_months, "user_id": user_id, "domain_roid": domain_roid}
+        )
+
+        # Charge create fee
+        if rate > 0:
+            await self._charge_registrant_transfer_fee(
+                account_id=account_id,
+                domain_name=domain_name,
+                amount=rate
+            )
+
+        # Log the transfer
+        await self._log_au_registrant_change(
+            domain_roid=domain_roid,
+            user_id=user_id,
+            change_type="TRANSFER",
+            explanation=explanation
+        )
+
+        return {"exDate": new_ex_date}
+
+    async def _log_au_registrant_change(
+        self,
+        domain_roid: str,
+        user_id: int,
+        change_type: str,
+        explanation: str
+    ) -> None:
+        """Log AU registrant change for audit trail."""
+        sql = """
+            INSERT INTO AU_REGISTRANT_HISTORY (
+                AU_REG_HIST_ID, DOM_ROID, CHANGE_TYPE, EXPLANATION,
+                CHANGE_DATE, CHANGE_USER_ID
+            ) VALUES (
+                AU_REG_HIST_SEQ.NEXTVAL, :domain_roid, :change_type, :explanation,
+                SYSDATE, :user_id
+            )
+        """
+        try:
+            await self.pool.execute(sql, {
+                "domain_roid": domain_roid,
+                "change_type": change_type,
+                "explanation": explanation,
+                "user_id": user_id
+            })
+        except Exception as e:
+            # Log but don't fail the main operation
+            logger.warning(f"Failed to log AU registrant change: {e}")
+
+
+    # =========================================================================
+    # Phase 7: secDNS (DNSSEC) Operations
+    # =========================================================================
+
+    async def get_domain_secdns_data(
+        self, domain_roid: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get DNSSEC data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+
+        Returns:
+            Dict with ds_data, key_data, max_sig_life or None
+        """
+        # Get DS records
+        ds_sql = """
+            SELECT DS_ID, KEY_TAG, ALG, DIGEST_TYPE, DIGEST,
+                   KEY_FLAGS, KEY_PROTOCOL, KEY_ALG, PUB_KEY
+            FROM DOMAIN_DNSSEC_DS
+            WHERE DOM_ROID = :domain_roid
+            ORDER BY KEY_TAG
+        """
+        ds_records = await self.pool.query(ds_sql, {"domain_roid": domain_roid})
+
+        # Get standalone Key records
+        key_sql = """
+            SELECT KEY_ID, FLAGS, PROTOCOL, ALG, PUB_KEY
+            FROM DOMAIN_DNSSEC_KEY
+            WHERE DOM_ROID = :domain_roid
+            ORDER BY FLAGS DESC
+        """
+        key_records = await self.pool.query(key_sql, {"domain_roid": domain_roid})
+
+        # Get max sig life
+        config_sql = """
+            SELECT MAX_SIG_LIFE
+            FROM DOMAIN_DNSSEC_CONFIG
+            WHERE DOM_ROID = :domain_roid
+        """
+        config = await self.pool.query_one(config_sql, {"domain_roid": domain_roid})
+
+        if not ds_records and not key_records:
+            return None
+
+        result = {
+            "ds_data": [],
+            "key_data": [],
+            "max_sig_life": config.get("MAX_SIG_LIFE") if config else None
+        }
+
+        for ds in ds_records:
+            ds_entry = {
+                "keyTag": ds["KEY_TAG"],
+                "alg": ds["ALG"],
+                "digestType": ds["DIGEST_TYPE"],
+                "digest": ds["DIGEST"]
+            }
+            # Check for embedded key data
+            if ds.get("KEY_FLAGS"):
+                ds_entry["keyData"] = {
+                    "flags": ds["KEY_FLAGS"],
+                    "protocol": ds["KEY_PROTOCOL"],
+                    "alg": ds["KEY_ALG"],
+                    "pubKey": ds["PUB_KEY"]
+                }
+            result["ds_data"].append(ds_entry)
+
+        for key in key_records:
+            result["key_data"].append({
+                "flags": key["FLAGS"],
+                "protocol": key["PROTOCOL"],
+                "alg": key["ALG"],
+                "pubKey": key["PUB_KEY"]
+            })
+
+        return result
+
+    async def save_domain_secdns_data(
+        self,
+        domain_roid: str,
+        ds_data: List[Dict[str, Any]] = None,
+        key_data: List[Dict[str, Any]] = None,
+        max_sig_life: int = None
+    ) -> None:
+        """
+        Save DNSSEC data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            ds_data: List of DS records
+            key_data: List of Key records
+            max_sig_life: Maximum signature lifetime
+        """
+        # Save max sig life config
+        if max_sig_life:
+            await self.pool.execute("""
+                MERGE INTO DOMAIN_DNSSEC_CONFIG c
+                USING (SELECT :domain_roid AS dom_roid FROM DUAL) src
+                ON (c.DOM_ROID = src.dom_roid)
+                WHEN MATCHED THEN UPDATE SET MAX_SIG_LIFE = :max_sig_life
+                WHEN NOT MATCHED THEN INSERT (CONFIG_ID, DOM_ROID, MAX_SIG_LIFE)
+                    VALUES (DNSSEC_CONFIG_SEQ.NEXTVAL, :domain_roid, :max_sig_life)
+            """, {"domain_roid": domain_roid, "max_sig_life": max_sig_life})
+
+        # Save DS records
+        if ds_data:
+            for ds in ds_data:
+                key_info = ds.get("keyData", {})
+                await self.pool.execute("""
+                    INSERT INTO DOMAIN_DNSSEC_DS (
+                        DS_ID, DOM_ROID, KEY_TAG, ALG, DIGEST_TYPE, DIGEST,
+                        KEY_FLAGS, KEY_PROTOCOL, KEY_ALG, PUB_KEY, CREATE_DATE
+                    ) VALUES (
+                        DNSSEC_DS_SEQ.NEXTVAL, :domain_roid, :key_tag, :alg,
+                        :digest_type, :digest, :key_flags, :key_protocol,
+                        :key_alg, :pub_key, SYSDATE
+                    )
+                """, {
+                    "domain_roid": domain_roid,
+                    "key_tag": ds.get("keyTag"),
+                    "alg": ds.get("alg"),
+                    "digest_type": ds.get("digestType"),
+                    "digest": ds.get("digest"),
+                    "key_flags": key_info.get("flags"),
+                    "key_protocol": key_info.get("protocol"),
+                    "key_alg": key_info.get("alg"),
+                    "pub_key": key_info.get("pubKey")
+                })
+
+        # Save standalone Key records
+        if key_data:
+            for key in key_data:
+                await self.pool.execute("""
+                    INSERT INTO DOMAIN_DNSSEC_KEY (
+                        KEY_ID, DOM_ROID, FLAGS, PROTOCOL, ALG, PUB_KEY, CREATE_DATE
+                    ) VALUES (
+                        DNSSEC_KEY_SEQ.NEXTVAL, :domain_roid, :flags, :protocol,
+                        :alg, :pub_key, SYSDATE
+                    )
+                """, {
+                    "domain_roid": domain_roid,
+                    "flags": key.get("flags"),
+                    "protocol": key.get("protocol"),
+                    "alg": key.get("alg"),
+                    "pub_key": key.get("pubKey")
+                })
+
+    async def delete_domain_secdns_data(
+        self,
+        domain_roid: str,
+        ds_data: List[Dict[str, Any]] = None,
+        key_data: List[Dict[str, Any]] = None,
+        remove_all: bool = False
+    ) -> None:
+        """
+        Delete DNSSEC data from a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            ds_data: Specific DS records to remove
+            key_data: Specific Key records to remove
+            remove_all: Remove all DNSSEC data
+        """
+        if remove_all:
+            await self.pool.execute(
+                "DELETE FROM DOMAIN_DNSSEC_DS WHERE DOM_ROID = :domain_roid",
+                {"domain_roid": domain_roid}
+            )
+            await self.pool.execute(
+                "DELETE FROM DOMAIN_DNSSEC_KEY WHERE DOM_ROID = :domain_roid",
+                {"domain_roid": domain_roid}
+            )
+            await self.pool.execute(
+                "DELETE FROM DOMAIN_DNSSEC_CONFIG WHERE DOM_ROID = :domain_roid",
+                {"domain_roid": domain_roid}
+            )
+            return
+
+        if ds_data:
+            for ds in ds_data:
+                await self.pool.execute("""
+                    DELETE FROM DOMAIN_DNSSEC_DS
+                    WHERE DOM_ROID = :domain_roid
+                      AND KEY_TAG = :key_tag
+                      AND ALG = :alg
+                      AND DIGEST_TYPE = :digest_type
+                """, {
+                    "domain_roid": domain_roid,
+                    "key_tag": ds.get("keyTag"),
+                    "alg": ds.get("alg"),
+                    "digest_type": ds.get("digestType")
+                })
+
+        if key_data:
+            for key in key_data:
+                await self.pool.execute("""
+                    DELETE FROM DOMAIN_DNSSEC_KEY
+                    WHERE DOM_ROID = :domain_roid
+                      AND FLAGS = :flags
+                      AND ALG = :alg
+                """, {
+                    "domain_roid": domain_roid,
+                    "flags": key.get("flags"),
+                    "alg": key.get("alg")
+                })
+
+    # =========================================================================
+    # Phase 8: IDN Extension Operations
+    # =========================================================================
+
+    async def get_domain_idn_data(
+        self, domain_roid: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get IDN data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+
+        Returns:
+            Dict with userForm, language, canonicalForm or None
+        """
+        sql = """
+            SELECT USER_FORM, LANGUAGE, CANONICAL_FORM
+            FROM DOMAIN_IDN
+            WHERE DOM_ROID = :domain_roid
+        """
+        return await self.pool.query_one(sql, {"domain_roid": domain_roid})
+
+    async def save_domain_idn_data(
+        self,
+        domain_roid: str,
+        user_form: str,
+        language: str,
+        canonical_form: str = None
+    ) -> None:
+        """
+        Save IDN data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            user_form: Unicode user form
+            language: BCP 47 language tag
+            canonical_form: Server-computed canonical form
+        """
+        await self.pool.execute("""
+            MERGE INTO DOMAIN_IDN i
+            USING (SELECT :domain_roid AS dom_roid FROM DUAL) src
+            ON (i.DOM_ROID = src.dom_roid)
+            WHEN MATCHED THEN UPDATE SET
+                USER_FORM = :user_form,
+                LANGUAGE = :language,
+                CANONICAL_FORM = :canonical_form,
+                UPDATE_DATE = SYSDATE
+            WHEN NOT MATCHED THEN INSERT (
+                IDN_ID, DOM_ROID, USER_FORM, LANGUAGE, CANONICAL_FORM, CREATE_DATE
+            ) VALUES (
+                DOMAIN_IDN_SEQ.NEXTVAL, :domain_roid, :user_form, :language,
+                :canonical_form, SYSDATE
+            )
+        """, {
+            "domain_roid": domain_roid,
+            "user_form": user_form,
+            "language": language,
+            "canonical_form": canonical_form
+        })
+
+    # =========================================================================
+    # Phase 9: Variant Extension Operations
+    # =========================================================================
+
+    async def get_domain_variants(
+        self, domain_roid: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get variants for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+
+        Returns:
+            List of variants with name and userForm
+        """
+        sql = """
+            SELECT VARIANT_NAME, USER_FORM
+            FROM DOMAIN_VARIANTS
+            WHERE DOM_ROID = :domain_roid
+            ORDER BY VARIANT_NAME
+        """
+        return await self.pool.query(sql, {"domain_roid": domain_roid})
+
+    async def add_domain_variants(
+        self,
+        domain_roid: str,
+        variants: List[Dict[str, str]]
+    ) -> None:
+        """
+        Add variants to a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            variants: List of variants with name and userForm
+        """
+        for variant in variants:
+            await self.pool.execute("""
+                INSERT INTO DOMAIN_VARIANTS (
+                    VARIANT_ID, DOM_ROID, VARIANT_NAME, USER_FORM, CREATE_DATE
+                ) VALUES (
+                    DOMAIN_VARIANT_SEQ.NEXTVAL, :domain_roid, :name, :user_form, SYSDATE
+                )
+            """, {
+                "domain_roid": domain_roid,
+                "name": variant.get("name"),
+                "user_form": variant.get("userForm")
+            })
+
+    async def remove_domain_variants(
+        self,
+        domain_roid: str,
+        variant_names: List[str]
+    ) -> int:
+        """
+        Remove variants from a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            variant_names: List of variant DNS names to remove
+
+        Returns:
+            Number of variants removed
+        """
+        count = 0
+        for name in variant_names:
+            result = await self.pool.execute("""
+                DELETE FROM DOMAIN_VARIANTS
+                WHERE DOM_ROID = :domain_roid AND VARIANT_NAME = :name
+            """, {"domain_roid": domain_roid, "name": name})
+            count += result
+        return count
+
+    # =========================================================================
+    # Phase 11: KV Extension Operations
+    # =========================================================================
+
+    async def get_domain_kv_data(
+        self, domain_roid: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get key-value data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+
+        Returns:
+            List of KV lists with their items
+        """
+        sql = """
+            SELECT LIST_NAME, KEY_NAME, VALUE
+            FROM DOMAIN_KV
+            WHERE DOM_ROID = :domain_roid
+            ORDER BY LIST_NAME, KEY_NAME
+        """
+        rows = await self.pool.query(sql, {"domain_roid": domain_roid})
+
+        # Group by list name
+        lists: Dict[str, List[Dict[str, str]]] = {}
+        for row in rows:
+            list_name = row["LIST_NAME"]
+            if list_name not in lists:
+                lists[list_name] = []
+            lists[list_name].append({
+                "key": row["KEY_NAME"],
+                "value": row["VALUE"]
+            })
+
+        return [{"name": name, "items": items} for name, items in lists.items()]
+
+    async def save_domain_kv_data(
+        self,
+        domain_roid: str,
+        kvlists: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Save key-value data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            kvlists: List of KV lists with items
+        """
+        for kvlist in kvlists:
+            list_name = kvlist.get("name", "")
+            items = kvlist.get("items", [])
+
+            # Delete existing items for this list
+            await self.pool.execute("""
+                DELETE FROM DOMAIN_KV
+                WHERE DOM_ROID = :domain_roid AND LIST_NAME = :list_name
+            """, {"domain_roid": domain_roid, "list_name": list_name})
+
+            # Insert new items
+            for item in items:
+                await self.pool.execute("""
+                    INSERT INTO DOMAIN_KV (
+                        KV_ID, DOM_ROID, LIST_NAME, KEY_NAME, VALUE, CREATE_DATE
+                    ) VALUES (
+                        DOMAIN_KV_SEQ.NEXTVAL, :domain_roid, :list_name,
+                        :key_name, :value, SYSDATE
+                    )
+                """, {
+                    "domain_roid": domain_roid,
+                    "list_name": list_name,
+                    "key_name": item.get("key"),
+                    "value": item.get("value")
+                })
+
+    async def delete_domain_kv_data(
+        self, domain_roid: str, list_name: str = None
+    ) -> int:
+        """
+        Delete key-value data for a domain.
+
+        Args:
+            domain_roid: Domain ROID
+            list_name: Specific list to delete, or None for all
+
+        Returns:
+            Number of records deleted
+        """
+        if list_name:
+            return await self.pool.execute("""
+                DELETE FROM DOMAIN_KV
+                WHERE DOM_ROID = :domain_roid AND LIST_NAME = :list_name
+            """, {"domain_roid": domain_roid, "list_name": list_name})
+        else:
+            return await self.pool.execute(
+                "DELETE FROM DOMAIN_KV WHERE DOM_ROID = :domain_roid",
+                {"domain_roid": domain_roid}
+            )
+
 
 # Global repository instance
 _extension_repo: Optional[ExtensionRepository] = None

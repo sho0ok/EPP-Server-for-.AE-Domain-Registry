@@ -9,7 +9,7 @@ Handles all domain-related database operations including:
 """
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from typing import Any, Dict, List, Optional, Tuple
 from decimal import Decimal
@@ -1377,6 +1377,246 @@ class DomainRepository:
     def extract_label(self, domain_name: str) -> str:
         """Extract label (first part) from domain name."""
         return domain_name.lower().split(".")[0]
+
+    # ========================================================================
+    # AR Extension Methods (Undelete, Unrenew, PolicyDelete, PolicyUndelete)
+    # ========================================================================
+
+    async def undelete(
+        self,
+        domain_roid: str,
+        user_id: int
+    ) -> bool:
+        """
+        Restore a deleted domain from redemption grace period.
+
+        Args:
+            domain_roid: Domain ROID
+            user_id: User performing the undelete
+
+        Returns:
+            True if successful
+        """
+        now = datetime.utcnow()
+
+        async with self.pool.transaction() as conn:
+            # Remove pendingDelete and redemptionPeriod statuses
+            await conn.execute(
+                """DELETE FROM EPP_DOMAIN_STATUSES
+                   WHERE EDS_ROID = :roid
+                   AND EDS_STATUS IN ('pendingDelete', 'redemptionPeriod')""",
+                {"roid": domain_roid}
+            )
+
+            # Check if any statuses remain, if not add 'ok'
+            status_count = await conn.query_value(
+                "SELECT COUNT(*) FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+                {"roid": domain_roid}
+            )
+            if status_count == 0:
+                await conn.execute(
+                    "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'ok')",
+                    {"roid": domain_roid}
+                )
+
+            # Update domain record
+            await conn.execute(
+                """UPDATE DOMAINS
+                   SET DOM_DELETE_DATE = NULL,
+                       DOM_UPDATE_DATE = :update_date,
+                       DOM_UPDATE_USER_ID = :user_id
+                   WHERE DOM_ROID = :roid""",
+                {"roid": domain_roid, "update_date": now, "user_id": user_id}
+            )
+
+            # Update registry object
+            await conn.execute(
+                """UPDATE REGISTRY_OBJECTS
+                   SET OBJ_UPDATE_DATE = :update_date,
+                       OBJ_UPDATE_USER_ID = :user_id
+                   WHERE OBJ_ROID = :roid""",
+                {"roid": domain_roid, "update_date": now, "user_id": user_id}
+            )
+
+        return True
+
+    async def unrenew(
+        self,
+        domain_roid: str,
+        user_id: int,
+        account_id: int
+    ) -> Dict[str, Any]:
+        """
+        Cancel a pending renewal and revert expiry date.
+
+        Args:
+            domain_roid: Domain ROID
+            user_id: User performing the unrenew
+            account_id: Account to refund
+
+        Returns:
+            Dict with exDate (reverted expiration date)
+        """
+        now = datetime.utcnow()
+
+        # Get the last renewal transaction to determine how much to refund
+        last_renewal = await self.pool.query_one(
+            """SELECT TRANSACTION_ID, PERIOD, PERIOD_UNIT, AMOUNT, OLD_EXPIRY_DATE
+               FROM DOMAIN_RENEWALS
+               WHERE DOM_ROID = :roid
+               AND RENEWAL_DATE > :cutoff
+               ORDER BY RENEWAL_DATE DESC
+               FETCH FIRST 1 ROW ONLY""",
+            {"roid": domain_roid, "cutoff": now - timedelta(days=30)}
+        )
+
+        if not last_renewal:
+            raise Exception("No recent renewal found to reverse")
+
+        old_expiry_date = last_renewal.get("OLD_EXPIRY_DATE")
+        if not old_expiry_date:
+            raise Exception("Original expiry date not recorded")
+
+        async with self.pool.transaction() as conn:
+            # Revert expiry date
+            await conn.execute(
+                """UPDATE DOMAINS
+                   SET DOM_EXPIRY_DATE = :old_expiry,
+                       DOM_UPDATE_DATE = :update_date,
+                       DOM_UPDATE_USER_ID = :user_id
+                   WHERE DOM_ROID = :roid""",
+                {"roid": domain_roid, "old_expiry": old_expiry_date,
+                 "update_date": now, "user_id": user_id}
+            )
+
+            # Refund the renewal fee
+            amount = last_renewal.get("AMOUNT", Decimal("0"))
+            if amount > 0:
+                await conn.execute(
+                    """INSERT INTO ACCOUNT_TRANSACTIONS
+                       (TRANSACTION_ID, ACCOUNT_ID, TRANSACTION_TYPE, AMOUNT,
+                        DESCRIPTION, TRANSACTION_DATE)
+                       VALUES (ACCOUNT_TXN_SEQ.NEXTVAL, :account_id, 'UNRENEW_REFUND',
+                               :amount, :description, SYSDATE)""",
+                    {"account_id": account_id, "amount": amount,
+                     "description": f"Unrenew refund for domain {domain_roid}"}
+                )
+
+                await conn.execute(
+                    "UPDATE ACCOUNTS SET BALANCE = BALANCE + :amount WHERE ACCOUNT_ID = :account_id",
+                    {"amount": amount, "account_id": account_id}
+                )
+
+            # Mark the renewal as reversed
+            await conn.execute(
+                "UPDATE DOMAIN_RENEWALS SET REVERSED = 'Y' WHERE TRANSACTION_ID = :txn_id",
+                {"txn_id": last_renewal.get("TRANSACTION_ID")}
+            )
+
+        # Format return date
+        return {"exDate": self._format_date(old_expiry_date)}
+
+    async def policy_delete(
+        self,
+        domain_roid: str,
+        user_id: int,
+        reason: Optional[str] = None
+    ) -> bool:
+        """
+        Delete a domain for policy violation.
+
+        This deletes immediately without grace period.
+
+        Args:
+            domain_roid: Domain ROID
+            user_id: User performing the delete
+            reason: Reason for policy deletion
+
+        Returns:
+            True if successful
+        """
+        now = datetime.utcnow()
+
+        async with self.pool.transaction() as conn:
+            # Log the policy deletion
+            await conn.execute(
+                """INSERT INTO DOMAIN_POLICY_ACTIONS
+                   (ACTION_ID, DOM_ROID, ACTION_TYPE, REASON, ACTION_DATE, USER_ID)
+                   VALUES (POLICY_ACTION_SEQ.NEXTVAL, :roid, 'POLICY_DELETE',
+                           :reason, :action_date, :user_id)""",
+                {"roid": domain_roid, "reason": reason, "action_date": now, "user_id": user_id}
+            )
+
+            # Update domain with immediate delete
+            await conn.execute(
+                """UPDATE DOMAINS
+                   SET DOM_DELETE_DATE = :delete_date,
+                       DOM_UPDATE_DATE = :update_date,
+                       DOM_UPDATE_USER_ID = :user_id
+                   WHERE DOM_ROID = :roid""",
+                {"roid": domain_roid, "delete_date": now, "update_date": now, "user_id": user_id}
+            )
+
+            # Set policy deleted status
+            await conn.execute(
+                "DELETE FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+                {"roid": domain_roid}
+            )
+            await conn.execute(
+                "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'serverDeleteProhibited')",
+                {"roid": domain_roid}
+            )
+
+        return True
+
+    async def policy_undelete(
+        self,
+        domain_roid: str,
+        user_id: int
+    ) -> bool:
+        """
+        Restore a domain that was deleted for policy violation.
+
+        Args:
+            domain_roid: Domain ROID
+            user_id: User performing the restore
+
+        Returns:
+            True if successful
+        """
+        now = datetime.utcnow()
+
+        async with self.pool.transaction() as conn:
+            # Log the policy undelete
+            await conn.execute(
+                """INSERT INTO DOMAIN_POLICY_ACTIONS
+                   (ACTION_ID, DOM_ROID, ACTION_TYPE, ACTION_DATE, USER_ID)
+                   VALUES (POLICY_ACTION_SEQ.NEXTVAL, :roid, 'POLICY_UNDELETE',
+                           :action_date, :user_id)""",
+                {"roid": domain_roid, "action_date": now, "user_id": user_id}
+            )
+
+            # Clear delete date
+            await conn.execute(
+                """UPDATE DOMAINS
+                   SET DOM_DELETE_DATE = NULL,
+                       DOM_UPDATE_DATE = :update_date,
+                       DOM_UPDATE_USER_ID = :user_id
+                   WHERE DOM_ROID = :roid""",
+                {"roid": domain_roid, "update_date": now, "user_id": user_id}
+            )
+
+            # Reset to ok status
+            await conn.execute(
+                "DELETE FROM EPP_DOMAIN_STATUSES WHERE EDS_ROID = :roid",
+                {"roid": domain_roid}
+            )
+            await conn.execute(
+                "INSERT INTO EPP_DOMAIN_STATUSES (EDS_ROID, EDS_STATUS) VALUES (:roid, 'ok')",
+                {"roid": domain_roid}
+            )
+
+        return True
 
 
 # Global repository instance

@@ -2,6 +2,13 @@
 
 A production-ready EPP (Extensible Provisioning Protocol) server for .AE domain registry. Implements RFC 5730-5734 with TLS 1.2+ and Oracle database backend.
 
+## Features
+
+- **Core EPP**: Domain, Contact, Host management (RFC 5731-5733)
+- **Extensions**: AE/AR/AU eligibility, ENUM/E.164, IDN, Variants, Key-Value metadata
+- **Security**: TLS 1.2+, rate limiting, session management
+- **Performance**: Async I/O, connection pooling
+
 ## Requirements
 
 - RHEL 9+ (Rocky Linux 9, AlmaLinux 9)
