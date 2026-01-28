@@ -965,34 +965,28 @@ class ExtensionRepository:
             domain_roid: Domain ROID
 
         Returns:
-            Dict with ds_data, key_data, max_sig_life or None
+            Dict with ds_data, key_data or None
         """
-        # Get DS records
-        ds_sql = """
-            SELECT DS_ID, KEY_TAG, ALG, DIGEST_TYPE, DIGEST,
-                   KEY_FLAGS, KEY_PROTOCOL, KEY_ALG, PUB_KEY
-            FROM DOMAIN_DNSSEC_DS
-            WHERE DOM_ROID = :domain_roid
-            ORDER BY KEY_TAG
-        """
-        ds_records = await self.pool.query(ds_sql, {"domain_roid": domain_roid})
-
-        # Get standalone Key records
+        # Get Key records first (they link to DS data)
         key_sql = """
-            SELECT KEY_ID, FLAGS, PROTOCOL, ALG, PUB_KEY
-            FROM DOMAIN_DNSSEC_KEY
+            SELECT KEY_DATA_ID, DOM_ROID, FLAGS, PROTOCOL, ALGORITHM, PUBLIC_KEY
+            FROM DNSSEC_KEY_DATA
             WHERE DOM_ROID = :domain_roid
             ORDER BY FLAGS DESC
         """
         key_records = await self.pool.query(key_sql, {"domain_roid": domain_roid})
 
-        # Get max sig life
-        config_sql = """
-            SELECT MAX_SIG_LIFE
-            FROM DOMAIN_DNSSEC_CONFIG
-            WHERE DOM_ROID = :domain_roid
+        # Get DS records (linked via KEY_DATA_ID or VARIANT_ID)
+        ds_sql = """
+            SELECT d.SEC_ID, d.VARIANT_ID, d.KEY_DATA_ID,
+                   d.DNSSEC_KEYTAG, d.DNSSEC_ALGORITHM, d.DNSSEC_DIGEST_TYPE, d.DNSSEC_DIGEST,
+                   k.FLAGS, k.PROTOCOL, k.ALGORITHM AS KEY_ALG, k.PUBLIC_KEY
+            FROM DNSSEC_DS_DATA d
+            LEFT JOIN DNSSEC_KEY_DATA k ON d.KEY_DATA_ID = k.KEY_DATA_ID
+            WHERE k.DOM_ROID = :domain_roid
+            ORDER BY d.DNSSEC_KEYTAG
         """
-        config = await self.pool.query_one(config_sql, {"domain_roid": domain_roid})
+        ds_records = await self.pool.query(ds_sql, {"domain_roid": domain_roid})
 
         if not ds_records and not key_records:
             return None
@@ -1000,23 +994,23 @@ class ExtensionRepository:
         result = {
             "ds_data": [],
             "key_data": [],
-            "max_sig_life": config.get("MAX_SIG_LIFE") if config else None
+            "max_sig_life": None
         }
 
         for ds in ds_records:
             ds_entry = {
-                "keyTag": ds["KEY_TAG"],
-                "alg": ds["ALG"],
-                "digestType": ds["DIGEST_TYPE"],
-                "digest": ds["DIGEST"]
+                "keyTag": ds["DNSSEC_KEYTAG"],
+                "alg": ds["DNSSEC_ALGORITHM"],
+                "digestType": ds["DNSSEC_DIGEST_TYPE"],
+                "digest": ds["DNSSEC_DIGEST"]
             }
             # Check for embedded key data
-            if ds.get("KEY_FLAGS"):
+            if ds.get("FLAGS"):
                 ds_entry["keyData"] = {
-                    "flags": ds["KEY_FLAGS"],
-                    "protocol": ds["KEY_PROTOCOL"],
+                    "flags": ds["FLAGS"],
+                    "protocol": ds["PROTOCOL"],
                     "alg": ds["KEY_ALG"],
-                    "pubKey": ds["PUB_KEY"]
+                    "pubKey": ds["PUBLIC_KEY"]
                 }
             result["ds_data"].append(ds_entry)
 
@@ -1024,8 +1018,8 @@ class ExtensionRepository:
             result["key_data"].append({
                 "flags": key["FLAGS"],
                 "protocol": key["PROTOCOL"],
-                "alg": key["ALG"],
-                "pubKey": key["PUB_KEY"]
+                "alg": key["ALGORITHM"],
+                "pubKey": key["PUBLIC_KEY"]
             })
 
         return result
@@ -1237,10 +1231,10 @@ class ExtensionRepository:
             List of variants with name and userForm
         """
         sql = """
-            SELECT VARIANT_NAME, USER_FORM
+            SELECT VARIANT_ID, DMV_A_LABEL AS VARIANT_NAME, DMV_U_LABEL AS USER_FORM, DMV_ZONE
             FROM DOMAIN_VARIANTS
-            WHERE DOM_ROID = :domain_roid
-            ORDER BY VARIANT_NAME
+            WHERE DMV_DOM_ROID = :domain_roid
+            ORDER BY DMV_A_LABEL
         """
         return await self.pool.query(sql, {"domain_roid": domain_roid})
 

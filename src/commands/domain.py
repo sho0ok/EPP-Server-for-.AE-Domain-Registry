@@ -152,41 +152,53 @@ class DomainInfoHandler(ObjectCommandHandler):
         # Get Phase 7-11 extension data
         extension_elements = []
 
-        # secDNS (DNSSEC) data
-        secdns_data = await extension_repo.get_domain_secdns_data(domain_roid)
-        if secdns_data:
-            secdns_elem = self.response_builder.build_secdns_info_data(secdns_data)
-            if secdns_elem is not None:
-                extension_elements.append(secdns_elem)
+        # secDNS (DNSSEC) data - skip if table doesn't exist
+        try:
+            secdns_data = await extension_repo.get_domain_secdns_data(domain_roid)
+            if secdns_data:
+                secdns_elem = self.response_builder.build_secdns_info_data(secdns_data)
+                if secdns_elem is not None:
+                    extension_elements.append(secdns_elem)
+        except Exception:
+            pass  # DNSSEC tables may not exist
 
-        # IDN data
-        idn_data = await extension_repo.get_domain_idn_data(domain_roid)
-        if idn_data:
-            idn_elem = self.response_builder.build_idn_info_data(
-                user_form=idn_data.get("USER_FORM"),
-                language=idn_data.get("LANGUAGE"),
-                canonical_form=idn_data.get("CANONICAL_FORM")
-            )
-            if idn_elem is not None:
-                extension_elements.append(idn_elem)
+        # IDN data - skip if table doesn't exist
+        try:
+            idn_data = await extension_repo.get_domain_idn_data(domain_roid)
+            if idn_data:
+                idn_elem = self.response_builder.build_idn_info_data(
+                    user_form=idn_data.get("USER_FORM"),
+                    language=idn_data.get("LANGUAGE"),
+                    canonical_form=idn_data.get("CANONICAL_FORM")
+                )
+                if idn_elem is not None:
+                    extension_elements.append(idn_elem)
+        except Exception:
+            pass  # IDN table may not exist
 
-        # Variant data
-        variant_data = await extension_repo.get_domain_variants(domain_roid)
-        if variant_data:
-            variants = [
-                {"name": v.get("VARIANT_NAME"), "userForm": v.get("USER_FORM")}
-                for v in variant_data
-            ]
-            variant_elem = self.response_builder.build_variant_info_data(variants)
-            if variant_elem is not None:
-                extension_elements.append(variant_elem)
+        # Variant data - skip if table doesn't exist
+        try:
+            variant_data = await extension_repo.get_domain_variants(domain_roid)
+            if variant_data:
+                variants = [
+                    {"name": v.get("VARIANT_NAME"), "userForm": v.get("USER_FORM")}
+                    for v in variant_data
+                ]
+                variant_elem = self.response_builder.build_variant_info_data(variants)
+                if variant_elem is not None:
+                    extension_elements.append(variant_elem)
+        except Exception:
+            pass  # Variant table may not exist
 
-        # KV data
-        kv_data = await extension_repo.get_domain_kv_data(domain_roid)
-        if kv_data:
-            kv_elem = self.response_builder.build_kv_info_data(kv_data)
-            if kv_elem is not None:
-                extension_elements.append(kv_elem)
+        # KV data - skip if table doesn't exist
+        try:
+            kv_data = await extension_repo.get_domain_kv_data(domain_roid)
+            if kv_data:
+                kv_elem = self.response_builder.build_kv_info_data(kv_data)
+                if kv_elem is not None:
+                    extension_elements.append(kv_elem)
+        except Exception:
+            pass  # KV table may not exist
 
         # Build response
         result_data = self.response_builder.build_domain_info_result(domain)
