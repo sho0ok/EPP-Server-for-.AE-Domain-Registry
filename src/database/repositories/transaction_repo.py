@@ -226,12 +226,20 @@ class TransactionRepository:
             conn_id: Connection ID
             reason: End reason
         """
-        await self.update_connection(
-            conn_id=conn_id,
-            end_time=datetime.utcnow(),
-            end_reason=reason,
-            status="CLOSE"
-        )
+        # Use GREATEST to ensure end_time > start_time (satisfies constraint)
+        sql = """
+            UPDATE CONNECTIONS
+            SET CNN_STATUS = 'CLOSE',
+                CNN_END_TIME = GREATEST(CNN_START_TIME + INTERVAL '1' SECOND, :end_time),
+                CNN_END_REASON = :end_reason
+            WHERE CNN_ID = :conn_id
+        """
+        await self.pool.execute(sql, {
+            "conn_id": conn_id,
+            "end_time": datetime.utcnow(),
+            "end_reason": reason[:100] if reason else "Normal disconnect"
+        })
+        logger.debug(f"Ended connection {conn_id}")
 
     async def increment_login_failures(self, conn_id: int) -> int:
         """
@@ -374,12 +382,20 @@ class TransactionRepository:
             session_id: Session ID
             reason: End reason
         """
-        await self.update_session(
-            session_id=session_id,
-            end_time=datetime.utcnow(),
-            end_reason=reason,
-            status="CLOSE"
-        )
+        # Use GREATEST to ensure end_time > start_time (satisfies SES_END_CK constraint)
+        sql = """
+            UPDATE SESSIONS
+            SET SES_STATUS = 'CLOSE',
+                SES_END_TIME = GREATEST(SES_START_TIME + INTERVAL '1' SECOND, :end_time),
+                SES_END_REASON = :end_reason
+            WHERE SES_ID = :session_id
+        """
+        await self.pool.execute(sql, {
+            "session_id": session_id,
+            "end_time": datetime.utcnow(),
+            "end_reason": reason[:100] if reason else "Normal logout"
+        })
+        logger.debug(f"Ended session {session_id}")
 
     async def touch_session(self, session_id: int) -> None:
         """
