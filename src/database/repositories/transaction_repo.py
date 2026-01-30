@@ -586,11 +586,11 @@ class TransactionRepository:
             Number of connections cleaned up
         """
         # Close ALL open connections - they're stale since we just started
-        # Note: CNN_STATUS is VARCHAR2(5), so use 'CLOSE' not 'CLOSE'
+        # Use GREATEST to ensure end_time > start_time (satisfies SES_END_CK constraint)
         sql = """
             UPDATE CONNECTIONS
             SET CNN_STATUS = 'CLOSE',
-                CNN_END_TIME = :end_time
+                CNN_END_TIME = GREATEST(CNN_START_TIME + INTERVAL '1' SECOND, :end_time)
             WHERE CNN_STATUS = 'OPEN'
         """
         result = await self.pool.execute(sql, {
@@ -598,11 +598,11 @@ class TransactionRepository:
         })
 
         # Also close all orphaned sessions
-        # Note: SES_STATUS is VARCHAR2(5), so use 'CLOSE' not 'CLOSE'
+        # Use GREATEST to ensure end_time > start_time (satisfies SES_END_CK constraint)
         sql_sessions = """
             UPDATE SESSIONS
             SET SES_STATUS = 'CLOSE',
-                SES_END_TIME = :end_time
+                SES_END_TIME = GREATEST(SES_START_TIME + INTERVAL '1' SECOND, :end_time)
             WHERE SES_STATUS = 'OPEN'
         """
         await self.pool.execute(sql_sessions, {
