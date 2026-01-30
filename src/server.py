@@ -328,6 +328,18 @@ class EPPClientHandler:
             self.session_id = self.session.session_id
             self.connection_id = self.session.connection_id
 
+            # Log the login transaction
+            trn_id = await session_mgr.log_command(
+                session=self.session,
+                command="Login",
+                client_ref=cl_trid
+            )
+            await session_mgr.complete_command(
+                trn_id=trn_id,
+                response_code=1000,
+                response_message="Command completed successfully"
+            )
+
             logger.info(f"Login successful: {client_id} (account {self.account_id}) from {self.client_ip}")
 
             return self.response_builder.build_response(
@@ -346,7 +358,26 @@ class EPPClientHandler:
 
     async def _handle_logout(self, command: EPPCommand) -> bytes:
         """Handle logout command."""
+        from src.core.session_manager import get_session_manager
+
         cl_trid = command.client_transaction_id
+
+        # Log the logout transaction before clearing session
+        if self.session and self.session.session_id:
+            session_mgr = get_session_manager()
+            trn_id = await session_mgr.log_command(
+                session=self.session,
+                command="Logout",
+                client_ref=cl_trid
+            )
+            await session_mgr.complete_command(
+                trn_id=trn_id,
+                response_code=1500,
+                response_message="Command completed successfully; ending session"
+            )
+
+            # End the session properly
+            await session_mgr.logout(self.session, "Normal logout")
 
         # Clear session state
         self.authenticated = False
@@ -442,7 +473,11 @@ class EPPClientHandler:
     async def _cleanup(self) -> None:
         """Clean up connection resources."""
         try:
-            # TODO: End session/connection in database
+            # End session/connection in database if authenticated
+            if self.session and (self.session.session_id or self.session.connection_id):
+                from src.core.session_manager import get_session_manager
+                session_mgr = get_session_manager()
+                await session_mgr.disconnect(self.session, "Connection closed")
 
             self.writer.close()
             await self.writer.wait_closed()
