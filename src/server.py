@@ -149,6 +149,12 @@ class EPPClientHandler:
                     # Process command
                     response = await self._process_command(command)
 
+                    # Update session last activity time
+                    if self.authenticated and self.session:
+                        from src.core.session_manager import get_session_manager
+                        session_mgr = get_session_manager()
+                        await session_mgr.touch(self.session)
+
                     # Log raw XML response
                     xml_logger.debug(f"RESPONSE to {self.client_ip}:\n{response.decode('utf-8', errors='replace')}")
 
