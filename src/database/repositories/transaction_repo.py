@@ -167,7 +167,7 @@ class TransactionRepository:
             "start_time": datetime.utcnow()
         })
 
-        logger.debug(f"Created connection {conn_id} for client {client_ip}")
+        logger.info(f"Created connection {conn_id} for account {account_id}, user {user_id}, client {client_ip}, server {server_name}")
         return conn_id
 
     async def update_connection(
@@ -322,7 +322,7 @@ class TransactionRepository:
             "extension_uris": extension_uris
         })
 
-        logger.debug(f"Created session {session_id} for user {user_id}")
+        logger.info(f"Created session {session_id} for user {user_id}, connection {connection_id}")
         return session_id
 
     async def update_session(
