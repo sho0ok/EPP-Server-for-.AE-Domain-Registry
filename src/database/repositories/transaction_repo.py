@@ -342,7 +342,15 @@ class TransactionRepository:
             end_time: Session end time
             end_reason: Reason for ending session
             status: New status
+
+        Note:
+            SES_END_CK constraint requires both end_time and end_reason
+            to be set together, or both to be NULL.
         """
+        # Enforce SES_END_CK constraint - both end_time and end_reason must be set together
+        if (end_time is not None) != (end_reason is not None):
+            raise ValueError("end_time and end_reason must both be set or both be None (SES_END_CK constraint)")
+
         updates = []
         params = {"session_id": session_id}
 
