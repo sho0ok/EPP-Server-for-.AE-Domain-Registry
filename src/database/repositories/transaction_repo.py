@@ -226,11 +226,10 @@ class TransactionRepository:
             conn_id: Connection ID
             reason: End reason
         """
-        # Use GREATEST to ensure end_time > start_time (satisfies constraint)
         sql = """
             UPDATE CONNECTIONS
             SET CNN_STATUS = 'CLOSE',
-                CNN_END_TIME = GREATEST(CNN_START_TIME + INTERVAL '1' SECOND, :end_time),
+                CNN_END_TIME = :end_time,
                 CNN_END_REASON = :end_reason
             WHERE CNN_ID = :conn_id
         """
@@ -382,11 +381,11 @@ class TransactionRepository:
             session_id: Session ID
             reason: End reason
         """
-        # Use GREATEST to ensure end_time > start_time (satisfies SES_END_CK constraint)
+        # SES_END_CK constraint requires both SES_END_TIME and SES_END_REASON to be set together
         sql = """
             UPDATE SESSIONS
             SET SES_STATUS = 'CLOSE',
-                SES_END_TIME = GREATEST(SES_START_TIME + INTERVAL '1' SECOND, :end_time),
+                SES_END_TIME = :end_time,
                 SES_END_REASON = :end_reason
             WHERE SES_ID = :session_id
         """
@@ -602,11 +601,12 @@ class TransactionRepository:
             Number of connections cleaned up
         """
         # Close ALL open connections - they're stale since we just started
-        # Use GREATEST to ensure end_time > start_time (satisfies SES_END_CK constraint)
+        # Must set both CNN_END_TIME and CNN_END_REASON together
         sql = """
             UPDATE CONNECTIONS
             SET CNN_STATUS = 'CLOSE',
-                CNN_END_TIME = GREATEST(CNN_START_TIME + INTERVAL '1' SECOND, :end_time)
+                CNN_END_TIME = :end_time,
+                CNN_END_REASON = 'Server restart cleanup'
             WHERE CNN_STATUS = 'OPEN'
         """
         result = await self.pool.execute(sql, {
@@ -614,11 +614,12 @@ class TransactionRepository:
         })
 
         # Also close all orphaned sessions
-        # Use GREATEST to ensure end_time > start_time (satisfies SES_END_CK constraint)
+        # SES_END_CK constraint requires both SES_END_TIME and SES_END_REASON to be set together
         sql_sessions = """
             UPDATE SESSIONS
             SET SES_STATUS = 'CLOSE',
-                SES_END_TIME = GREATEST(SES_START_TIME + INTERVAL '1' SECOND, :end_time)
+                SES_END_TIME = :end_time,
+                SES_END_REASON = 'Server restart cleanup'
             WHERE SES_STATUS = 'OPEN'
         """
         await self.pool.execute(sql_sessions, {
