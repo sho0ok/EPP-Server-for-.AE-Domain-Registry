@@ -385,26 +385,29 @@ class TransactionRepository:
         reason: str = "Normal logout"
     ) -> None:
         """
-        End a session (convenience method).
+        End a session using ARI's session_t.end_session() method.
 
         Args:
             session_id: Session ID
             reason: End reason
         """
-        # SES_END_CK constraint requires both SES_END_TIME and SES_END_REASON to be set together
+        # Use ARI's session_t.end_session() for portal compatibility
         sql = """
-            UPDATE SESSIONS
-            SET SES_STATUS = 'C',
-                SES_END_TIME = :end_time,
-                SES_END_REASON = :end_reason
-            WHERE SES_ID = :session_id
+            DECLARE
+                l_session session_t;
+                l_result INTEGER;
+            BEGIN
+                l_result := session_t.get(:session_id, l_session);
+                IF l_result = 0 THEN
+                    l_result := l_session.end_session(:reason);
+                END IF;
+            END;
         """
         await self.pool.execute(sql, {
             "session_id": session_id,
-            "end_time": datetime.utcnow(),
-            "end_reason": reason[:100] if reason else "Normal logout"
+            "reason": reason[:100] if reason else "Normal logout"
         })
-        logger.debug(f"Ended session {session_id}")
+        logger.debug(f"Ended session {session_id} via session_t.end_session()")
 
     async def touch_session(self, session_id: int) -> None:
         """
@@ -631,24 +634,24 @@ class TransactionRepository:
             "server_name": server_name
         })
 
-        # Close orphaned sessions linked to those connections
-        # Use session_t.end_session for portal compatibility
+        # Close ALL orphaned sessions for this server using ARI's session_t.end_connection_sessions
+        # This properly closes sessions when connections are ended
         sql_sessions = """
-            UPDATE SESSIONS
-            SET SES_STATUS = 'C',
-                SES_END_TIME = :end_time,
-                SES_END_REASON = 'Server restart cleanup'
-            WHERE SES_STATUS = 'E'
-            AND SES_END_TIME IS NULL
-            AND SES_CONNECTION_ID IN (
-                SELECT CNN_ID FROM CONNECTIONS
-                WHERE CNN_SERVER_NAME = :server_name
-                AND CNN_STATUS = 'C'
-                AND CNN_END_REASON = 'Server restart cleanup'
-            )
+            BEGIN
+                FOR conn IN (
+                    SELECT CNN_ID, CNN_END_TIME FROM CONNECTIONS
+                    WHERE CNN_SERVER_NAME = :server_name
+                    AND CNN_STATUS = 'C'
+                ) LOOP
+                    session_t.end_connection_sessions(
+                        conn.CNN_ID,
+                        NVL(conn.CNN_END_TIME, SYSTIMESTAMP),
+                        'Server restart cleanup'
+                    );
+                END LOOP;
+            END;
         """
         await self.pool.execute(sql_sessions, {
-            "end_time": now,
             "server_name": server_name
         })
 
