@@ -300,20 +300,21 @@ class TransactionRepository:
         """
         # Use ARI's session_t.start_session() method for portal compatibility
         # This is how the ARI EPP server creates sessions
+        # The session ID is stored in l_session.session_id after start_session() is called
         sql = """
             DECLARE
                 l_session session_t := session_t();
-                l_session_id INTEGER;
+                l_result INTEGER;
             BEGIN
                 l_session.session_language := :lang;
                 l_session.object_uris_text := :object_uris;
                 l_session.extensions_text := :extension_uris;
-                l_session_id := l_session.start_session(:connection_id, :user_id);
-                :session_id := l_session_id;
+                l_result := l_session.start_session(:connection_id, :user_id);
+                :session_id := l_session.session_id;
             END;
         """
 
-        # Use query_one_with_out_params to get the output parameter
+        # Use execute_plsql to get the output parameter
         result = await self.pool.execute_plsql(sql, {
             "lang": lang,
             "object_uris": object_uris,
@@ -392,22 +393,29 @@ class TransactionRepository:
             reason: End reason
         """
         # Use ARI's session_t.end_session() for portal compatibility
+        # Also set SES_STATUS = 'C' explicitly since the trigger doesn't do this
         sql = """
             DECLARE
                 l_session session_t;
                 l_result INTEGER;
             BEGIN
                 l_result := session_t.get(:session_id, l_session);
-                IF l_result = 0 THEN
+                IF l_result = 0 OR l_result = 100 THEN
                     l_result := l_session.end_session(:reason);
                 END IF;
+                -- Also explicitly update status in case end_session doesn't
+                UPDATE SESSIONS
+                SET SES_STATUS = 'C',
+                    SES_END_TIME = NVL(SES_END_TIME, SYSTIMESTAMP),
+                    SES_END_REASON = NVL(SES_END_REASON, :reason)
+                WHERE SES_ID = :session_id;
             END;
         """
         await self.pool.execute(sql, {
             "session_id": session_id,
             "reason": reason[:100] if reason else "Normal logout"
         })
-        logger.debug(f"Ended session {session_id} via session_t.end_session()")
+        logger.info(f"Ended session {session_id} via session_t.end_session()")
 
     async def touch_session(self, session_id: int) -> None:
         """
