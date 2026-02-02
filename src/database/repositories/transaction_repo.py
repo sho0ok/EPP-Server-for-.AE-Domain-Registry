@@ -151,7 +151,7 @@ class TransactionRepository:
                 :conn_id, :account_id, :user_id,
                 :server_name, :server_ip, :server_port,
                 :client_ip, :client_port,
-                :start_time, 0, 'Open'
+                :start_time, 0, 'O'
             )
         """
 
@@ -228,7 +228,7 @@ class TransactionRepository:
         """
         sql = """
             UPDATE CONNECTIONS
-            SET CNN_STATUS = 'Close',
+            SET CNN_STATUS = 'C',
                 CNN_END_TIME = :end_time,
                 CNN_END_REASON = :end_reason
             WHERE CNN_ID = :conn_id
@@ -305,7 +305,7 @@ class TransactionRepository:
                 SES_OBJECT_URIS, SES_EXTENSION_URIS
             ) VALUES (
                 :session_id, :user_id, :connection_id, :client_ip,
-                :start_time, :last_used, 'Open', :lang,
+                :start_time, :last_used, 'O', :lang,
                 :object_uris, :extension_uris
             )
         """
@@ -392,7 +392,7 @@ class TransactionRepository:
         # SES_END_CK constraint requires both SES_END_TIME and SES_END_REASON to be set together
         sql = """
             UPDATE SESSIONS
-            SET SES_STATUS = 'Close',
+            SET SES_STATUS = 'C',
                 SES_END_TIME = :end_time,
                 SES_END_REASON = :end_reason
             WHERE SES_ID = :session_id
@@ -612,10 +612,10 @@ class TransactionRepository:
         # Must set both CNN_END_TIME and CNN_END_REASON together
         sql = """
             UPDATE CONNECTIONS
-            SET CNN_STATUS = 'Close',
+            SET CNN_STATUS = 'C',
                 CNN_END_TIME = :end_time,
                 CNN_END_REASON = 'Server restart cleanup'
-            WHERE CNN_STATUS = 'Open'
+            WHERE CNN_STATUS = 'O'
         """
         result = await self.pool.execute(sql, {
             "end_time": datetime.utcnow()
@@ -625,10 +625,10 @@ class TransactionRepository:
         # SES_END_CK constraint requires both SES_END_TIME and SES_END_REASON to be set together
         sql_sessions = """
             UPDATE SESSIONS
-            SET SES_STATUS = 'Close',
+            SET SES_STATUS = 'C',
                 SES_END_TIME = :end_time,
                 SES_END_REASON = 'Server restart cleanup'
-            WHERE SES_STATUS = 'Open'
+            WHERE SES_STATUS = 'O'
         """
         await self.pool.execute(sql_sessions, {
             "end_time": datetime.utcnow()

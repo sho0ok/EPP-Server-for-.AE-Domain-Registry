@@ -577,7 +577,7 @@ class AccountRepository:
         sql = """
             SELECT COUNT(*) FROM CONNECTIONS
             WHERE CNN_ACCOUNT_ID = :account_id
-              AND CNN_STATUS = 'Open'
+              AND CNN_STATUS = 'O'
         """
         result = await self.pool.query_value(sql, {"account_id": account_id})
         return int(result) if result else 0
