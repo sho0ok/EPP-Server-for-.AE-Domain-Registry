@@ -589,9 +589,11 @@ class EPPServer:
             logger.warning("Server will start but database operations will fail")
 
         # Initialize session manager
+        import socket
         server_config = self.config.get("server", {})
         epp_config = self.config.get("epp", {})
-        server_name = epp_config.get("server_id", "epp.aeda.ae")
+        # Use hostname for CNN_SERVER_NAME (matches ARI behavior for Open Connections portal)
+        server_name = epp_config.get("server_id") or socket.getfqdn()
 
         initialize_session_manager(
             server_name=server_name,

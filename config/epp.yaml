@@ -3,7 +3,7 @@ server:
   port: 700
   max_connections: 100
   connection_timeout: 300
-  read_timeout: 60
+  read_timeout: 1500  # 25 minutes (matches ARI Session Timeout setting)
   server_name: "epp.aeda.ae"
 
 tls:
@@ -22,7 +22,8 @@ oracle:
   pool_increment: 2
 
 epp:
-  server_id: "TDRA .AE EPP Server"
+  # server_id: Leave blank to use hostname (recommended for Open Connections portal)
+  server_id: ""
   roid_suffix: "AE"
   supported_versions:
     - "1.0"
