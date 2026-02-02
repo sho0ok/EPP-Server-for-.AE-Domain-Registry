@@ -471,6 +471,61 @@ class DatabasePool:
                 logger.error(f"Query failed: {e}")
                 raise QueryError(f"Query failed: {e}") from e
 
+    async def execute_plsql(
+        self,
+        sql: str,
+        params: Dict[str, Any],
+        commit: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Execute a PL/SQL block with IN/OUT parameters.
+
+        Args:
+            sql: PL/SQL block with named parameters
+            params: Dictionary of parameter values (OUT params should be None)
+            commit: Whether to commit the transaction
+
+        Returns:
+            Dictionary with output parameter values
+
+        Raises:
+            QueryError: If execution fails
+        """
+        async with self.acquire() as conn:
+            try:
+                cursor = conn.cursor()
+
+                # Create variables for OUT parameters
+                out_vars = {}
+                bind_params = {}
+                for key, value in params.items():
+                    if value is None:
+                        # This is an OUT parameter - create a variable
+                        out_vars[key] = cursor.var(int)
+                        bind_params[key] = out_vars[key]
+                    else:
+                        bind_params[key] = value
+
+                cursor.execute(sql, bind_params)
+
+                if commit:
+                    conn.commit()
+
+                # Get values from OUT variables
+                result = {}
+                for key, var in out_vars.items():
+                    result[key] = var.getvalue()
+
+                cursor.close()
+                return result
+
+            except oracledb.Error as e:
+                conn.rollback()
+                logger.error(f"PL/SQL execution failed: {e}")
+                logger.debug(f"SQL: {sql}")
+                logger.debug(f"Params: {params}")
+                raise QueryError(f"PL/SQL execution failed: {e}") from e
+
     async def get_next_sequence(self, sequence_name: str) -> int:
         """
         Get next value from Oracle sequence.

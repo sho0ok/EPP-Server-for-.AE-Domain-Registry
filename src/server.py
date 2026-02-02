@@ -601,7 +601,7 @@ class EPPServer:
         )
         logger.info("Session manager initialized")
 
-        # Cleanup stale connections from previous server runs
+        # Cleanup stale connections from previous server runs (for THIS server only)
         try:
             from src.database.repositories.transaction_repo import get_transaction_repo
             trn_repo = await get_transaction_repo()

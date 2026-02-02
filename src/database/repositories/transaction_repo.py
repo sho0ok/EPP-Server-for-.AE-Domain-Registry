@@ -282,12 +282,15 @@ class TransactionRepository:
         extension_uris: Optional[str] = None
     ) -> int:
         """
-        Create a new session record.
+        Create a new session record using ARI's session_t.start_session() method.
+
+        This uses the Oracle object type method to ensure compatibility with the
+        ARI portal's Open Sessions page.
 
         Args:
             user_id: FK to USERS
             connection_id: FK to CONNECTIONS
-            client_ip: Client IP address
+            client_ip: Client IP address (not used - stored in CONNECTIONS)
             lang: Session language
             object_uris: Supported object URIs (comma-separated)
             extension_uris: Supported extension URIs (comma-separated)
@@ -295,34 +298,33 @@ class TransactionRepository:
         Returns:
             New session ID
         """
-        session_id = await self.pool.get_next_sequence("SES_ID_SEQ")
-        now = datetime.utcnow()
-
+        # Use ARI's session_t.start_session() method for portal compatibility
+        # This is how the ARI EPP server creates sessions
         sql = """
-            INSERT INTO SESSIONS (
-                SES_ID, SES_USER_ID, SES_CONNECTION_ID, SES_CLIENT_IP,
-                SES_START_TIME, SES_LAST_USED, SES_STATUS, SES_LANG,
-                SES_OBJECT_URIS, SES_EXTENSION_URIS
-            ) VALUES (
-                :session_id, :user_id, :connection_id, :client_ip,
-                :start_time, :last_used, 'O', :lang,
-                :object_uris, :extension_uris
-            )
+            DECLARE
+                l_session session_t := session_t();
+                l_session_id INTEGER;
+            BEGIN
+                l_session.session_language := :lang;
+                l_session.object_uris_text := :object_uris;
+                l_session.extensions_text := :extension_uris;
+                l_session_id := l_session.start_session(:connection_id, :user_id);
+                :session_id := l_session_id;
+            END;
         """
 
-        await self.pool.execute(sql, {
-            "session_id": session_id,
-            "user_id": user_id,
-            "connection_id": connection_id,
-            "client_ip": client_ip,
-            "start_time": now,
-            "last_used": now,
+        # Use query_one_with_out_params to get the output parameter
+        result = await self.pool.execute_plsql(sql, {
             "lang": lang,
             "object_uris": object_uris,
-            "extension_uris": extension_uris
+            "extension_uris": extension_uris,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "session_id": None  # OUT parameter
         })
 
-        logger.info(f"Created session {session_id} for user {user_id}, connection {connection_id}")
+        session_id = result.get("session_id")
+        logger.info(f"Created session {session_id} for user {user_id}, connection {connection_id} via session_t.start_session()")
         return session_id
 
     async def update_session(
@@ -597,18 +599,23 @@ class TransactionRepository:
 
     async def cleanup_stale_connections(self, server_name: str) -> int:
         """
-        Close all stale OPEN connections on startup.
+        Close stale OPEN connections for THIS server on startup.
 
         This handles the case where the server crashed without properly
         closing connections, leaving orphaned OPEN records in the database.
 
+        Only cleans up connections from THIS server (by CNN_SERVER_NAME) to avoid
+        affecting other servers and to limit the number of rows updated.
+
         Args:
-            server_name: Server name (for logging)
+            server_name: Server name to filter by
 
         Returns:
             Number of connections cleaned up
         """
-        # Close ALL open connections - they're stale since we just started
+        now = datetime.utcnow()
+
+        # Close open connections for THIS server only
         # Must set both CNN_END_TIME and CNN_END_REASON together
         sql = """
             UPDATE CONNECTIONS
@@ -616,25 +623,36 @@ class TransactionRepository:
                 CNN_END_TIME = :end_time,
                 CNN_END_REASON = 'Server restart cleanup'
             WHERE CNN_STATUS = 'O'
+            AND CNN_SERVER_NAME = :server_name
+            AND CNN_END_TIME IS NULL
         """
         result = await self.pool.execute(sql, {
-            "end_time": datetime.utcnow()
+            "end_time": now,
+            "server_name": server_name
         })
 
-        # Also close all orphaned sessions
-        # SES_END_CK constraint requires both SES_END_TIME and SES_END_REASON to be set together
+        # Close orphaned sessions linked to those connections
+        # Use session_t.end_session for portal compatibility
         sql_sessions = """
             UPDATE SESSIONS
             SET SES_STATUS = 'C',
                 SES_END_TIME = :end_time,
                 SES_END_REASON = 'Server restart cleanup'
-            WHERE SES_STATUS = 'O'
+            WHERE SES_STATUS = 'E'
+            AND SES_END_TIME IS NULL
+            AND SES_CONNECTION_ID IN (
+                SELECT CNN_ID FROM CONNECTIONS
+                WHERE CNN_SERVER_NAME = :server_name
+                AND CNN_STATUS = 'C'
+                AND CNN_END_REASON = 'Server restart cleanup'
+            )
         """
         await self.pool.execute(sql_sessions, {
-            "end_time": datetime.utcnow()
+            "end_time": now,
+            "server_name": server_name
         })
 
-        logger.info(f"Cleaned up all stale OPEN connections on server startup")
+        logger.info(f"Cleaned up stale connections for server {server_name}")
         return result if result else 0
 
 
