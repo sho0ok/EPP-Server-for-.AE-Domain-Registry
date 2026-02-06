@@ -601,6 +601,25 @@ class EPPServer:
         )
         logger.info("Session manager initialized")
 
+        # Register this EPP server with ARI (same as old C++ server did on startup)
+        try:
+            from src.database.plsql_caller import get_plsql_caller
+            plsql = await get_plsql_caller()
+            server_ip = socket.gethostbyname(socket.gethostname())
+            await plsql.register_server(
+                server_name=server_name,
+                server_ip=server_ip,
+                server_port=server_config.get("port", 700),
+                supported_uris=[
+                    "urn:ietf:params:xml:ns:domain-1.0",
+                    "urn:ietf:params:xml:ns:contact-1.0",
+                    "urn:ietf:params:xml:ns:host-1.0",
+                ]
+            )
+            logger.info(f"EPP server registered with ARI: {server_name} ({server_ip})")
+        except Exception as e:
+            logger.warning(f"Failed to register EPP server with ARI: {e}")
+
         # Cleanup stale connections from previous server runs (for THIS server only)
         try:
             from src.database.repositories.transaction_repo import get_transaction_repo

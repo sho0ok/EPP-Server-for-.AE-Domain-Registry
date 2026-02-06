@@ -131,49 +131,6 @@ class SessionManager:
         if self._account_repo is None:
             self._account_repo = await get_account_repo()
 
-    async def _fallback_create_connection(
-        self,
-        username: str,
-        session: 'SessionInfo'
-    ) -> int:
-        """
-        Fallback connection creation when epp.start_connection() fails.
-        Looks up real user/account IDs to satisfy FK constraints.
-        """
-        user_id = 0
-        account_id = 0
-        try:
-            # Try direct username lookup first
-            user_data = await self._account_repo.get_user_by_username(username)
-            if user_data:
-                user_id = user_data.get("USR_ID", 0)
-                account_id = user_data.get("USR_ACCOUNT_ID", 0)
-            else:
-                # Try by ACC_CLIENT_ID (EPP clID maps to this)
-                user_data = await self._account_repo.get_epp_user_by_client_id(username)
-                if user_data:
-                    user_id = user_data.get("USR_ID", 0)
-                    account_id = user_data.get("USR_ACCOUNT_ID", 0) or user_data.get("ACC_ID", 0)
-        except Exception as e:
-            logger.warning(f"Failed to lookup user for fallback connection: {e}")
-
-        if user_id == 0 or account_id == 0:
-            logger.error(
-                f"Cannot create fallback connection for {username}: "
-                f"user_id={user_id}, account_id={account_id}"
-            )
-            raise RuntimeError(f"Cannot create connection: user {username} not found")
-
-        return await self._transaction_repo.create_connection(
-            account_id=account_id,
-            user_id=user_id,
-            server_name=self.server_name,
-            server_ip=self._server_ip,
-            server_port=self.server_port,
-            client_ip=session.client_ip,
-            client_port=session.client_port
-        )
-
     async def create_session_info(
         self,
         client_ip: str,
@@ -238,27 +195,23 @@ class SessionManager:
         plsql = await get_plsql_caller()
 
         # Step 1: Call epp.start_connection() to register the connection
-        try:
-            rc, connection_id = await plsql.start_connection(
-                username=username,
-                server_name=self.server_name,
-                server_ip=self._server_ip,
-                server_port=self.server_port,
-                client_ip=session.client_ip,
-                client_port=session.client_port
-            )
+        rc, connection_id = await plsql.start_connection(
+            username=username,
+            server_name=self.server_name,
+            server_ip=self._server_ip,
+            server_port=self.server_port,
+            client_ip=session.client_ip,
+            client_port=session.client_port
+        )
 
-            if connection_id is None or rc != 0:
-                logger.warning(
-                    f"epp.start_connection() failed for {username}: rc={rc}"
-                )
-                connection_id = await self._fallback_create_connection(
-                    username, session
-                )
-        except Exception as e:
-            logger.warning(f"epp.start_connection() error: {e}, falling back to manual")
-            connection_id = await self._fallback_create_connection(
-                username, session
+        if connection_id is None or rc != 0:
+            logger.error(
+                f"epp.start_connection() failed for {username}: rc={rc}. "
+                f"Server may not be registered in EPP_SERVERS table."
+            )
+            raise RuntimeError(
+                f"Server not authorized (rc={rc}). "
+                f"Ensure epp.register_server() succeeded on startup."
             )
 
         session.connection_id = connection_id

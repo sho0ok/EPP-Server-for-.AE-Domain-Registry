@@ -38,6 +38,58 @@ class EPPProcedureCaller:
         self.pool = pool
 
     # ========================================================================
+    # EPP Server Registration (epp package)
+    # ========================================================================
+
+    async def register_server(
+        self,
+        server_name: str,
+        server_ip: str,
+        server_port: int,
+        supported_uris: List[str]
+    ) -> None:
+        """
+        Call epp.register_server() to register this EPP server.
+
+        The old C++ EPP server called this on startup. It inserts a record
+        into EPP_SERVERS with status 'A' (Active), which authorizes the
+        server IP for epp.start_connection() calls.
+
+        Args:
+            server_name: Server hostname
+            server_ip: Server IP address
+            server_port: Server port
+            supported_uris: List of supported EPP URIs
+        """
+        uris_literal = self._build_urn_list_literal(supported_uris)
+
+        sql = f"""
+            BEGIN
+                epp.register_server(
+                    server_name    => :server_name,
+                    server_ip      => :server_ip,
+                    server_port    => :server_port,
+                    supported_uris => {uris_literal}
+                );
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, {
+                "server_name": server_name,
+                "server_ip": server_ip,
+                "server_port": server_port
+            })
+            conn.commit()
+            cursor.close()
+
+            logger.info(
+                f"epp.register_server() called: name={server_name}, "
+                f"ip={server_ip}, port={server_port}"
+            )
+
+    # ========================================================================
     # EPP Connection & Session (epp package)
     # ========================================================================
 
