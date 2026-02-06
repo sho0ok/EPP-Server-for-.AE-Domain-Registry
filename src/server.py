@@ -309,7 +309,8 @@ class EPPClientHandler:
                 version=version,
                 language=lang,
                 object_uris=object_uris,
-                extension_uris=extension_uris
+                extension_uris=extension_uris,
+                cltrid=cl_trid
             )
 
             if not result["success"]:

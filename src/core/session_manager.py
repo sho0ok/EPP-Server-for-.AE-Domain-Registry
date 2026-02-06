@@ -204,7 +204,8 @@ class SessionManager:
         version: str = "1.0",
         language: str = "en",
         object_uris: Optional[List[str]] = None,
-        extension_uris: Optional[List[str]] = None
+        extension_uris: Optional[List[str]] = None,
+        cltrid: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Authenticate a user and establish session using ARI's stored procedures.
@@ -265,7 +266,7 @@ class SessionManager:
                 lang=language,
                 obj_uris=object_uris or [],
                 ext_uris=extension_uris or [],
-                cltrid=None  # Login doesn't have a clTRID from our side
+                cltrid=cltrid
             )
 
             response_code = login_result.get("response_code", 2400)
