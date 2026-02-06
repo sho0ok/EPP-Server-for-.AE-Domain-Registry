@@ -361,6 +361,45 @@ class DomainRepository:
         })
         return Decimal(str(result)) if result else None
 
+    async def get_rate_with_id(
+        self,
+        zone: str,
+        period: int,
+        unit: str = "y"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get registration/renewal rate for zone and period with rate ID.
+
+        Args:
+            zone: Zone name
+            period: Period value
+            unit: Period unit (y=year, m=month)
+
+        Returns:
+            Dict with 'amount' and 'rate_id', or None
+        """
+        sql = """
+            SELECT RAT_ID, RAT_AMOUNT
+            FROM RATES
+            WHERE RAT_ZONE = :zone
+              AND RAT_PERIOD = :period
+              AND RAT_UNIT = :unit
+              AND RAT_START_DATE <= :today
+              AND (RAT_END_DATE IS NULL OR RAT_END_DATE > :today)
+        """
+        result = await self.pool.query_one(sql, {
+            "zone": zone.lower(),
+            "period": period,
+            "unit": unit,
+            "today": date.today()
+        })
+        if result:
+            return {
+                "rate_id": result.get("RAT_ID"),
+                "amount": Decimal(str(result.get("RAT_AMOUNT")))
+            }
+        return None
+
     # ========================================================================
     # Authorization Operations
     # ========================================================================

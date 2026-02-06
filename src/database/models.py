@@ -113,6 +113,8 @@ class Transaction:
     TRN_BALANCE: Optional[Decimal] = None  # Balance after
     TRN_AUDIT_LOG: Optional[str] = None  # Audit details
     TRN_APPLICATION_TIME: Optional[int] = None  # Processing time (ms)
+    TRN_RATE_ID: Optional[int] = None  # FK to RATES table
+    TRN_COMMENTS: Optional[str] = None  # Transaction comments (e.g., domain name)
 
 
 # ============================================================================

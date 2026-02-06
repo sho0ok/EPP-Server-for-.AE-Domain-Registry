@@ -66,6 +66,11 @@ class DomainCheckHandler(ObjectCommandHandler):
         domain_repo = await get_domain_repo()
         results = await domain_repo.check_multiple(names)
 
+        # Set audit log for transaction
+        self.set_transaction_data(
+            audit_log=f"Domain Check: {', '.join(names)}"
+        )
+
         # Build response
         result_data = self.response_builder.build_domain_check_result(results)
 
@@ -199,6 +204,13 @@ class DomainInfoHandler(ObjectCommandHandler):
                     extension_elements.append(kv_elem)
         except Exception:
             pass  # KV table may not exist
+
+        # Set audit log for transaction
+        domain_roid = domain.get("roid")
+        self.set_transaction_data(
+            roid=domain_roid,
+            audit_log=f"Domain Info: {domain_name}"
+        )
 
         # Build response
         result_data = self.response_builder.build_domain_info_result(domain)
@@ -371,14 +383,16 @@ class DomainCreateHandler(ObjectCommandHandler):
                     reason="; ".join(extension_errors)
                 )
 
-        # Get rate for billing
-        rate = await domain_repo.get_rate(zone, period, unit)
-        if rate is None:
+        # Get rate for billing (with rate_id for transaction logging)
+        rate_info = await domain_repo.get_rate_with_id(zone, period, unit)
+        if rate_info is None:
             raise CommandError(
                 2306,
                 "Parameter value policy error",
                 reason=f"No rate found for {period}{unit} in zone {zone}"
             )
+        rate = rate_info["amount"]
+        rate_id = rate_info["rate_id"]
 
         # Check account balance
         account_repo = await get_account_repo()
@@ -409,9 +423,10 @@ class DomainCreateHandler(ObjectCommandHandler):
         # Create domain with billing in single atomic operation
         # Note: Debit happens first - if billing fails, no domain is created
         # If domain creation fails after billing, we should credit back (handled in except)
+        new_balance = None
         try:
             # Debit account FIRST - ensures payment before domain creation
-            await account_repo.debit_balance(session.account_id, rate)
+            new_balance = await account_repo.debit_balance(session.account_id, rate)
             billing_complete = True
 
             try:
@@ -460,6 +475,17 @@ class DomainCreateHandler(ObjectCommandHandler):
                 "Command failed",
                 reason=str(e)
             )
+
+        # Set transaction data for audit logging
+        # This populates TRN_AMOUNT, TRN_BALANCE, TRN_ROID, TRN_AUDIT_LOG, TRN_RATE_ID, TRN_COMMENTS in TRANSACTIONS table
+        self.set_transaction_data(
+            amount=rate,
+            balance=new_balance,
+            roid=roid,
+            audit_log=f"Domain Create: {domain_name}, Period: {period}{unit}, Registrant: {registrant_id}",
+            rate_id=rate_id,
+            comments=domain_name
+        )
 
         # Build response
         result_data = self.response_builder.build_domain_create_result(
@@ -707,6 +733,28 @@ class DomainUpdateHandler(ObjectCommandHandler):
                 reason=str(e)
             )
 
+        # Build audit log with update details
+        audit_parts = [f"Domain Update: {domain_name}"]
+        if registrant_id:
+            audit_parts.append(f"Registrant: {registrant_id}")
+        if add_contacts:
+            audit_parts.append(f"Add contacts: {add_contacts}")
+        if rem_contacts:
+            audit_parts.append(f"Rem contacts: {rem_contacts}")
+        if add_nameservers:
+            audit_parts.append(f"Add NS: {add_nameservers}")
+        if rem_nameservers:
+            audit_parts.append(f"Rem NS: {rem_nameservers}")
+        if add_statuses:
+            audit_parts.append(f"Add status: {[s for s in add_statuses if s]}")
+        if rem_statuses:
+            audit_parts.append(f"Rem status: {[s for s in rem_statuses if s]}")
+
+        self.set_transaction_data(
+            roid=domain_roid,
+            audit_log=", ".join(audit_parts)
+        )
+
         logger.info(f"Updated domain: {domain_name}")
 
         return self.success_response(cl_trid=cl_trid)
@@ -832,6 +880,7 @@ class DomainDeleteHandler(ObjectCommandHandler):
             raise AuthorizationError("Only sponsoring registrar can delete domain")
 
         # Perform delete (marks as pendingDelete)
+        domain_roid = domain.get("roid")
         try:
             await domain_repo.delete(domain_name, immediate=False)
         except Exception as e:
@@ -841,6 +890,12 @@ class DomainDeleteHandler(ObjectCommandHandler):
                 "Command failed",
                 reason=str(e)
             )
+
+        # Set audit log for transaction
+        self.set_transaction_data(
+            roid=domain_roid,
+            audit_log=f"Domain Delete: {domain_name}"
+        )
 
         logger.info(f"Marked domain for deletion: {domain_name}")
 
@@ -934,15 +989,17 @@ class DomainRenewHandler(ObjectCommandHandler):
         if not valid:
             raise CommandError(2005, "Parameter value syntax error", reason=error)
 
-        # Get zone and rate
+        # Get zone and rate (with rate_id for transaction logging)
         zone = domain.get("_zone")
-        rate = await domain_repo.get_rate(zone, period, unit)
-        if rate is None:
+        rate_info = await domain_repo.get_rate_with_id(zone, period, unit)
+        if rate_info is None:
             raise CommandError(
                 2306,
                 "Parameter value policy error",
                 reason=f"No rate found for {period}{unit} in zone {zone}"
             )
+        rate = rate_info["amount"]
+        rate_id = rate_info["rate_id"]
 
         # Check account balance
         account_repo = await get_account_repo()
@@ -955,9 +1012,11 @@ class DomainRenewHandler(ObjectCommandHandler):
             )
 
         # Perform renewal with billing
+        new_balance = None
+        domain_roid = domain.get("roid")
         try:
             # Debit account FIRST
-            await account_repo.debit_balance(session.account_id, rate)
+            new_balance = await account_repo.debit_balance(session.account_id, rate)
 
             try:
                 result = await domain_repo.renew(
@@ -988,6 +1047,17 @@ class DomainRenewHandler(ObjectCommandHandler):
                 "Command failed",
                 reason=str(e)
             )
+
+        # Set transaction data for audit logging
+        # This populates TRN_AMOUNT, TRN_BALANCE, TRN_ROID, TRN_AUDIT_LOG, TRN_RATE_ID, TRN_COMMENTS in TRANSACTIONS table
+        self.set_transaction_data(
+            amount=rate,
+            balance=new_balance,
+            roid=domain_roid,
+            audit_log=f"Domain Renew: {domain_name}, Period: {period}{unit}, New Expiry: {result.get('exDate')}",
+            rate_id=rate_id,
+            comments=domain_name
+        )
 
         # Build response
         result_data = self.response_builder.build_domain_renew_result(
@@ -1056,6 +1126,13 @@ class DomainTransferHandler(ObjectCommandHandler):
                     "Object does not exist",
                     reason="No pending transfer for domain"
                 )
+
+            # Set audit log for transfer query
+            domain_roid = domain.get("roid")
+            self.set_transaction_data(
+                roid=domain_roid,
+                audit_log=f"Domain Transfer Query: {domain_name}"
+            )
 
             result_data = self.response_builder.build_domain_transfer_result(
                 name=domain_name,
@@ -1126,6 +1203,13 @@ class DomainTransferHandler(ObjectCommandHandler):
                 logger.error(f"Failed to request transfer for {domain_name}: {e}")
                 raise CommandError(2400, "Command failed", reason=str(e))
 
+            # Set audit log for transfer request
+            domain_roid = domain.get("roid")
+            self.set_transaction_data(
+                roid=domain_roid,
+                audit_log=f"Domain Transfer Request: {domain_name}, Period: {period}{unit}"
+            )
+
             result_data = self.response_builder.build_domain_transfer_result(
                 name=domain_name,
                 tr_status="pending",
@@ -1150,11 +1234,18 @@ class DomainTransferHandler(ObjectCommandHandler):
             if sponsoring_account != session.account_id:
                 raise AuthorizationError("Only current sponsoring registrar can approve transfer")
 
+            domain_roid = domain.get("roid")
             try:
                 result = await domain_repo.approve_transfer(domain_name, session.user_id)
             except Exception as e:
                 logger.error(f"Failed to approve transfer for {domain_name}: {e}")
                 raise CommandError(2400, "Command failed", reason=str(e))
+
+            # Set audit log for transfer approve
+            self.set_transaction_data(
+                roid=domain_roid,
+                audit_log=f"Domain Transfer Approve: {domain_name}"
+            )
 
             logger.info(f"Transfer approved for domain: {domain_name}")
             return self.success_response(cl_trid=cl_trid)
@@ -1164,11 +1255,18 @@ class DomainTransferHandler(ObjectCommandHandler):
             if sponsoring_account != session.account_id:
                 raise AuthorizationError("Only current sponsoring registrar can reject transfer")
 
+            domain_roid = domain.get("roid")
             try:
                 result = await domain_repo.reject_transfer(domain_name, session.user_id)
             except Exception as e:
                 logger.error(f"Failed to reject transfer for {domain_name}: {e}")
                 raise CommandError(2400, "Command failed", reason=str(e))
+
+            # Set audit log for transfer reject
+            self.set_transaction_data(
+                roid=domain_roid,
+                audit_log=f"Domain Transfer Reject: {domain_name}"
+            )
 
             logger.info(f"Transfer rejected for domain: {domain_name}")
             return self.success_response(cl_trid=cl_trid)
@@ -1185,12 +1283,19 @@ class DomainTransferHandler(ObjectCommandHandler):
 
             # Check if this registrar requested the transfer
             # (would need to look up account client ID)
+            domain_roid = domain.get("roid")
 
             try:
                 result = await domain_repo.cancel_transfer(domain_name, session.user_id)
             except Exception as e:
                 logger.error(f"Failed to cancel transfer for {domain_name}: {e}")
                 raise CommandError(2400, "Command failed", reason=str(e))
+
+            # Set audit log for transfer cancel
+            self.set_transaction_data(
+                roid=domain_roid,
+                audit_log=f"Domain Transfer Cancel: {domain_name}"
+            )
 
             logger.info(f"Transfer cancelled for domain: {domain_name}")
             return self.success_response(cl_trid=cl_trid)

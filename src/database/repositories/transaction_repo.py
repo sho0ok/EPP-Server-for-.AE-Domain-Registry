@@ -495,7 +495,9 @@ class TransactionRepository:
         amount: Optional[Decimal] = None,
         balance: Optional[Decimal] = None,
         audit_log: Optional[str] = None,
-        application_time: Optional[int] = None
+        application_time: Optional[int] = None,
+        rate_id: Optional[int] = None,
+        comments: Optional[str] = None
     ) -> None:
         """
         Complete a transaction record.
@@ -508,6 +510,8 @@ class TransactionRepository:
             balance: Account balance after transaction
             audit_log: Audit details
             application_time: Processing time in milliseconds
+            rate_id: FK to RATES table (for billing operations)
+            comments: Transaction comments (typically domain name for domain ops)
         """
         # Convert EPP response code to ARI internal code
         # The RESPONSE_CODES table uses internal codes (100=ok, 200+=errors)
@@ -521,7 +525,9 @@ class TransactionRepository:
                 TRN_AMOUNT = :amount,
                 TRN_BALANCE = :balance,
                 TRN_AUDIT_LOG = :audit_log,
-                TRN_APPLICATION_TIME = :application_time
+                TRN_APPLICATION_TIME = :application_time,
+                TRN_RATE_ID = :rate_id,
+                TRN_COMMENTS = :comments
             WHERE TRN_ID = :trn_id
         """
 
@@ -533,7 +539,9 @@ class TransactionRepository:
             "amount": amount,
             "balance": balance,
             "audit_log": audit_log[:4000] if audit_log else None,
-            "application_time": application_time
+            "application_time": application_time,
+            "rate_id": rate_id,
+            "comments": comments[:4000] if comments else None
         })
 
         logger.debug(f"Completed transaction {trn_id}: EPP code={response_code} -> ARI code={ari_response_code}")

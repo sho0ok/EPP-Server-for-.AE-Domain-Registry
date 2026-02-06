@@ -355,10 +355,59 @@ class ObjectCommandHandler(BaseCommandHandler):
     - Object type identification
     - ROID tracking in transactions
     - Common validation
+    - Transaction metadata (amount, balance, audit_log) for billing operations
     """
 
     # Object type (domain, contact, host)
     object_type: str = "unknown"
+
+    def __init__(self):
+        """Initialize handler with transaction metadata storage."""
+        super().__init__()
+        # Transaction metadata populated by handlers for logging
+        # These values are passed to complete_command() for audit trail
+        self._trn_amount: Optional[Decimal] = None
+        self._trn_balance: Optional[Decimal] = None
+        self._trn_audit_log: Optional[str] = None
+        self._trn_roid: Optional[str] = None  # ROID created/affected by command
+        self._trn_rate_id: Optional[int] = None  # FK to RATES table
+        self._trn_comments: Optional[str] = None  # Comments (e.g., domain name)
+
+    def set_transaction_data(
+        self,
+        amount: Optional[Decimal] = None,
+        balance: Optional[Decimal] = None,
+        roid: Optional[str] = None,
+        audit_log: Optional[str] = None,
+        rate_id: Optional[int] = None,
+        comments: Optional[str] = None
+    ) -> None:
+        """
+        Set transaction metadata for audit logging.
+
+        Called by handlers (e.g., DomainCreate, DomainRenew) to store
+        billing and audit information that will be logged to TRANSACTIONS table.
+
+        Args:
+            amount: Transaction amount (debit amount)
+            balance: Account balance after transaction
+            roid: ROID of created/affected object
+            audit_log: Audit details (command parameters, etc.)
+            rate_id: FK to RATES table (for billing operations)
+            comments: Transaction comments (typically domain name)
+        """
+        if amount is not None:
+            self._trn_amount = amount
+        if balance is not None:
+            self._trn_balance = balance
+        if roid is not None:
+            self._trn_roid = roid
+        if audit_log is not None:
+            self._trn_audit_log = audit_log
+        if rate_id is not None:
+            self._trn_rate_id = rate_id
+        if comments is not None:
+            self._trn_comments = comments
 
     async def execute(
         self,
@@ -369,6 +418,7 @@ class ObjectCommandHandler(BaseCommandHandler):
         Execute with object-specific logging.
 
         Extracts ROID for transaction logging when available.
+        Passes billing metadata (amount, balance, audit_log) to transaction log.
         """
         cl_trid = command.client_transaction_id
         start_time = datetime.utcnow()
@@ -377,13 +427,21 @@ class ObjectCommandHandler(BaseCommandHandler):
         response_message = None  # Track error message for logging
         roid = None
 
+        # Reset transaction metadata for this execution
+        self._trn_amount = None
+        self._trn_balance = None
+        self._trn_audit_log = None
+        self._trn_roid = None
+        self._trn_rate_id = None
+        self._trn_comments = None
+
         try:
             if self.requires_auth and not session.authenticated:
                 raise AuthenticationError("Command use error: not logged in")
 
             session_mgr = get_session_manager()
 
-            # Try to get ROID from command data
+            # Try to get ROID from command data (for existing objects)
             roid = await self.get_roid_from_command(command, session)
 
             # Convert EPP command format to ARI database format
@@ -436,11 +494,30 @@ class ObjectCommandHandler(BaseCommandHandler):
             if trn_id and session.authenticated:
                 try:
                     session_mgr = get_session_manager()
+                    # Use handler-stored ROID if available (for create operations)
+                    # Otherwise fall back to ROID from command lookup
+                    final_roid = self._trn_roid or roid
+
+                    # Update ROID in transaction if we now have it (e.g., after create)
+                    if final_roid and final_roid != roid:
+                        # Update the transaction record with the new ROID
+                        from src.database.repositories.transaction_repo import get_transaction_repo
+                        trn_repo = await get_transaction_repo()
+                        await trn_repo.pool.execute(
+                            "UPDATE TRANSACTIONS SET TRN_ROID = :roid WHERE TRN_ID = :trn_id",
+                            {"roid": final_roid, "trn_id": trn_id}
+                        )
+
                     await session_mgr.complete_command(
                         trn_id=trn_id,
                         response_code=response_code,
                         response_message=response_message,
-                        start_time=start_time
+                        amount=self._trn_amount,
+                        balance=self._trn_balance,
+                        audit_log=self._trn_audit_log,
+                        start_time=start_time,
+                        rate_id=self._trn_rate_id,
+                        comments=self._trn_comments
                     )
                 except Exception as e:
                     logger.error(f"Failed to complete transaction log: {e}")

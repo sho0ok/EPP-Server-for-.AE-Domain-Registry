@@ -396,7 +396,9 @@ class SessionManager:
         amount: Optional[Any] = None,
         balance: Optional[Any] = None,
         audit_log: Optional[str] = None,
-        start_time: Optional[datetime] = None
+        start_time: Optional[datetime] = None,
+        rate_id: Optional[int] = None,
+        comments: Optional[str] = None
     ) -> None:
         """
         Complete command logging.
@@ -409,6 +411,8 @@ class SessionManager:
             balance: Account balance after transaction
             audit_log: Audit details
             start_time: Command start time (for calculating duration)
+            rate_id: FK to RATES table (for billing operations)
+            comments: Transaction comments (typically domain name for domain ops)
         """
         await self._get_repos()
 
@@ -424,7 +428,9 @@ class SessionManager:
             amount=amount,
             balance=balance,
             audit_log=audit_log,
-            application_time=app_time
+            application_time=app_time,
+            rate_id=rate_id,
+            comments=comments
         )
 
     async def check_rate_limit(
