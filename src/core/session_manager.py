@@ -131,6 +131,49 @@ class SessionManager:
         if self._account_repo is None:
             self._account_repo = await get_account_repo()
 
+    async def _fallback_create_connection(
+        self,
+        username: str,
+        session: 'SessionInfo'
+    ) -> int:
+        """
+        Fallback connection creation when epp.start_connection() fails.
+        Looks up real user/account IDs to satisfy FK constraints.
+        """
+        user_id = 0
+        account_id = 0
+        try:
+            # Try direct username lookup first
+            user_data = await self._account_repo.get_user_by_username(username)
+            if user_data:
+                user_id = user_data.get("USR_ID", 0)
+                account_id = user_data.get("USR_ACCOUNT_ID", 0)
+            else:
+                # Try by ACC_CLIENT_ID (EPP clID maps to this)
+                user_data = await self._account_repo.get_epp_user_by_client_id(username)
+                if user_data:
+                    user_id = user_data.get("USR_ID", 0)
+                    account_id = user_data.get("USR_ACCOUNT_ID", 0) or user_data.get("ACC_ID", 0)
+        except Exception as e:
+            logger.warning(f"Failed to lookup user for fallback connection: {e}")
+
+        if user_id == 0 or account_id == 0:
+            logger.error(
+                f"Cannot create fallback connection for {username}: "
+                f"user_id={user_id}, account_id={account_id}"
+            )
+            raise RuntimeError(f"Cannot create connection: user {username} not found")
+
+        return await self._transaction_repo.create_connection(
+            account_id=account_id,
+            user_id=user_id,
+            server_name=self.server_name,
+            server_ip=self._server_ip,
+            server_port=self.server_port,
+            client_ip=session.client_ip,
+            client_port=session.client_port
+        )
+
     async def create_session_info(
         self,
         client_ip: str,
@@ -209,26 +252,13 @@ class SessionManager:
                 logger.warning(
                     f"epp.start_connection() failed for {username}: rc={rc}"
                 )
-                # Fallback to manual connection creation
-                connection_id = await self._transaction_repo.create_connection(
-                    account_id=0,
-                    user_id=0,
-                    server_name=self.server_name,
-                    server_ip=self._server_ip,
-                    server_port=self.server_port,
-                    client_ip=session.client_ip,
-                    client_port=session.client_port
+                connection_id = await self._fallback_create_connection(
+                    username, session
                 )
         except Exception as e:
             logger.warning(f"epp.start_connection() error: {e}, falling back to manual")
-            connection_id = await self._transaction_repo.create_connection(
-                account_id=0,
-                user_id=0,
-                server_name=self.server_name,
-                server_ip=self._server_ip,
-                server_port=self.server_port,
-                client_ip=session.client_ip,
-                client_port=session.client_port
+            connection_id = await self._fallback_create_connection(
+                username, session
             )
 
         session.connection_id = connection_id

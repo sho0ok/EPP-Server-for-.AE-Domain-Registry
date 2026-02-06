@@ -98,8 +98,8 @@ class EPPProcedureCaller:
             conn.commit()
             cursor.close()
 
-            rc = return_code_var.getvalue()[0] if return_code_var.getvalue() else -1
-            cid = connection_id_var.getvalue()[0] if connection_id_var.getvalue() else None
+            rc = self._extract_var(return_code_var, -1)
+            cid = self._extract_var(connection_id_var, None)
 
             logger.info(f"epp.start_connection() returned rc={rc}, connection_id={cid}")
             return rc, cid
@@ -138,7 +138,7 @@ class EPPProcedureCaller:
             conn.commit()
             cursor.close()
 
-            rc = return_code_var.getvalue()[0] if return_code_var.getvalue() else -1
+            rc = self._extract_var(return_code_var, -1)
             logger.info(f"epp.end_connection({connection_id}) returned rc={rc}")
             return rc
 
