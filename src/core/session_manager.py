@@ -231,38 +231,8 @@ class SessionManager:
         await self._get_repos()
         plsql = await get_plsql_caller()
 
-        # Debug: check EPP_SERVERS and ACCOUNT_EPP_ADDRESSES for this connection
-        try:
-            from src.database.connection import get_pool
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                cursor = conn.cursor()
-                # Check EPP_SERVERS
-                cursor.execute(
-                    "SELECT EPP_ID, EPP_STATUS, EPP_SERVER_NAME, EPP_SERVER_IP, EPP_SERVER_PORT "
-                    "FROM EPP_SERVERS WHERE EPP_STATUS = 'A' ORDER BY EPP_ID DESC FETCH FIRST 5 ROWS ONLY"
-                )
-                servers = cursor.fetchall()
-                logger.info(f"Active EPP_SERVERS: {servers}")
-
-                # Check ACCOUNT_EPP_ADDRESSES for this user's account
-                cursor.execute(
-                    "SELECT a.AEA_ACC_ID, a.AEA_IP_ADDRESS, a.AEA_ACTIVE_DATE "
-                    "FROM ACCOUNT_EPP_ADDRESSES a "
-                    "JOIN USERS u ON u.USR_ACCOUNT_ID = a.AEA_ACC_ID "
-                    "WHERE UPPER(u.USR_USERNAME) = UPPER(:username)",
-                    {"username": username}
-                )
-                addrs = cursor.fetchall()
-                logger.info(
-                    f"ACCOUNT_EPP_ADDRESSES for {username}: {addrs} "
-                    f"(client_ip={session.client_ip})"
-                )
-                cursor.close()
-        except Exception as e:
-            logger.warning(f"Debug query failed: {e}")
-
         # Step 1: Call epp.start_connection() to register the connection
+        # ARI returns rc=100 for success (not 0)
         rc, connection_id = await plsql.start_connection(
             username=username,
             server_name=self.server_name,
@@ -272,13 +242,15 @@ class SessionManager:
             client_port=session.client_port
         )
 
-        if connection_id is None or rc != 0:
+        if connection_id is None or rc >= 200:
             logger.warning(
                 f"epp.start_connection() failed for {username}: rc={rc}, "
                 f"server_ip={self._server_ip}, client_ip={session.client_ip}"
             )
             # Fallback: look up user/account and create connection manually
             connection_id = await self._fallback_create_connection(username, session)
+        else:
+            logger.info(f"epp.start_connection() ok: rc={rc}, connection_id={connection_id}")
 
         session.connection_id = connection_id
 
