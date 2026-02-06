@@ -112,6 +112,16 @@ class EPPProcedureCaller:
     # EPP Connection & Session (epp package)
     # ========================================================================
 
+    @staticmethod
+    def _to_ipv6_mapped(ip: str) -> str:
+        """
+        Convert IPv4 address to IPv6-mapped format if needed.
+        ARI stores client IPs as ::ffff:x.x.x.x in ACCOUNT_EPP_ADDRESSES.
+        """
+        if ip and ':' not in ip:
+            return f"::ffff:{ip}"
+        return ip
+
     async def start_connection(
         self,
         username: str,
@@ -135,6 +145,9 @@ class EPPProcedureCaller:
         Returns:
             Tuple of (return_code, connection_id)
         """
+        # ARI stores client IPs in IPv6-mapped format (::ffff:x.x.x.x)
+        client_ip_mapped = self._to_ipv6_mapped(client_ip)
+
         sql = """
             DECLARE
                 l_rc INTEGER;
@@ -161,7 +174,7 @@ class EPPProcedureCaller:
                 "server_name": server_name,
                 "server_ip": server_ip,
                 "server_port": server_port,
-                "client_ip": client_ip,
+                "client_ip": client_ip_mapped,
                 "client_port": client_port,
                 "connection_id": connection_id_var,
                 "return_code": return_code_var
