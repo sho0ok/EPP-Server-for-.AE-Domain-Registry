@@ -406,35 +406,53 @@ class DomainCreateHandler(ObjectCommandHandler):
         contacts = data.get("contacts", [])
         nameservers = data.get("ns", [])
 
-        # Create domain
+        # Create domain with billing in single atomic operation
+        # Note: Debit happens first - if billing fails, no domain is created
+        # If domain creation fails after billing, we should credit back (handled in except)
         try:
-            domain = await domain_repo.create(
-                domain_name=domain_name,
-                roid=roid,
-                account_id=session.account_id,
-                user_id=session.user_id,
-                registrant_id=registrant_id,
-                auth_info=auth_info,
-                period=period,
-                unit=unit,
-                contacts=contacts,
-                nameservers=nameservers
-            )
+            # Debit account FIRST - ensures payment before domain creation
+            await account_repo.debit_balance(session.account_id, rate)
+            billing_complete = True
 
-            # Save extension data if present
-            if extension_data and zone_id:
-                await self._save_extension_data(
-                    extension_repo, roid, zone_id, extension_data
+            try:
+                domain = await domain_repo.create(
+                    domain_name=domain_name,
+                    roid=roid,
+                    account_id=session.account_id,
+                    user_id=session.user_id,
+                    registrant_id=registrant_id,
+                    auth_info=auth_info,
+                    period=period,
+                    unit=unit,
+                    contacts=contacts,
+                    nameservers=nameservers
                 )
 
-            # Save Phase 7-11 extension data
-            await self._save_phase7_11_extensions(
-                extension_repo, roid, command.extensions
+                # Save extension data if present
+                if extension_data and zone_id:
+                    await self._save_extension_data(
+                        extension_repo, roid, zone_id, extension_data
+                    )
+
+                # Save Phase 7-11 extension data
+                await self._save_phase7_11_extensions(
+                    extension_repo, roid, command.extensions
+                )
+
+            except Exception as e:
+                # Domain creation failed after billing - refund
+                logger.error(f"Domain creation failed, refunding account: {e}")
+                await account_repo.credit_balance(session.account_id, rate)
+                raise
+
+        except ValueError as e:
+            # Billing failure (insufficient funds)
+            logger.error(f"Billing failed for domain {domain_name}: {e}")
+            raise CommandError(
+                2104,
+                "Billing failure",
+                reason=str(e)
             )
-
-            # Debit account
-            await account_repo.debit_balance(session.account_id, rate)
-
         except Exception as e:
             logger.error(f"Failed to create domain {domain_name}: {e}")
             raise CommandError(
@@ -936,19 +954,33 @@ class DomainRenewHandler(ObjectCommandHandler):
                 reason="Insufficient balance"
             )
 
-        # Perform renewal
+        # Perform renewal with billing
         try:
-            result = await domain_repo.renew(
-                domain_name=domain_name,
-                user_id=session.user_id,
-                current_expiry=current_expiry,
-                period=period,
-                unit=unit
-            )
-
-            # Debit account
+            # Debit account FIRST
             await account_repo.debit_balance(session.account_id, rate)
 
+            try:
+                result = await domain_repo.renew(
+                    domain_name=domain_name,
+                    user_id=session.user_id,
+                    current_expiry=current_expiry,
+                    period=period,
+                    unit=unit
+                )
+            except Exception as e:
+                # Renewal failed after billing - refund
+                logger.error(f"Domain renewal failed, refunding account: {e}")
+                await account_repo.credit_balance(session.account_id, rate)
+                raise
+
+        except ValueError as e:
+            # Billing failure (insufficient funds)
+            logger.error(f"Billing failed for domain renewal {domain_name}: {e}")
+            raise CommandError(
+                2104,
+                "Billing failure",
+                reason=str(e)
+            )
         except Exception as e:
             logger.error(f"Failed to renew domain {domain_name}: {e}")
             raise CommandError(

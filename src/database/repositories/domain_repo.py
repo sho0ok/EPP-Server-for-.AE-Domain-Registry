@@ -563,10 +563,10 @@ class DomainRepository:
             reg_sql = """
                 INSERT INTO DOMAIN_REGISTRATIONS (
                     DRE_ID, DRE_ROID, DRE_SEQ, DRE_PERIOD, DRE_UNIT,
-                    DRE_START_DATE, DRE_EXPIRE_DATE, DRE_STATUS
+                    DRE_REQUEST_DATE, DRE_START_DATE, DRE_EXPIRE_DATE, DRE_STATUS
                 ) VALUES (
                     :reg_id, :roid, 1, :period, :unit,
-                    :start_date, :expire_date, 'approved'
+                    :request_date, :start_date, :expire_date, 'approved'
                 )
             """
             await conn.execute(reg_sql, {
@@ -574,6 +574,7 @@ class DomainRepository:
                 "roid": roid,
                 "period": period,
                 "unit": unit,
+                "request_date": now,
                 "start_date": now,
                 "expire_date": expiry_date
             })
@@ -591,7 +592,7 @@ class DomainRepository:
             # Add contacts
             if contacts:
                 for contact in contacts:
-                    contact_roid = await self._get_contact_roid(contact["id"])
+                    contact_roid = await self._get_contact_roid(contact["id"], conn)
                     if contact_roid:
                         contact_sql = """
                             INSERT INTO DOMAIN_CONTACTS (
@@ -605,11 +606,13 @@ class DomainRepository:
                             "contact_roid": contact_roid,
                             "contact_type": contact["type"]
                         })
+                    else:
+                        logger.warning(f"Contact {contact['id']} not found, skipping")
 
             # Add nameservers
             if nameservers:
                 for ns in nameservers:
-                    host_roid = await self._get_host_roid(ns)
+                    host_roid = await self._get_host_roid(ns, conn)
                     if host_roid:
                         ns_sql = """
                             INSERT INTO DOMAIN_NAMESERVERS (
@@ -622,6 +625,8 @@ class DomainRepository:
                             "domain_roid": roid,
                             "host_roid": host_roid
                         })
+                    else:
+                        logger.warning(f"Host {ns} not found, skipping")
 
             # Add default 'ok' status
             status_sql = """
@@ -637,14 +642,30 @@ class DomainRepository:
 
         return await self.get_by_name(domain_name)
 
-    async def _get_contact_roid(self, contact_id: str) -> Optional[str]:
-        """Get ROID for contact by UID."""
+    async def _get_contact_roid(self, contact_id: str, conn=None) -> Optional[str]:
+        """Get ROID for contact by UID.
+
+        Args:
+            contact_id: Contact UID
+            conn: Optional transaction connection (uses pool if None)
+        """
         sql = "SELECT CON_ROID FROM CONTACTS WHERE CON_UID = :contact_id"
+        if conn:
+            result = await conn.query_one(sql, {"contact_id": contact_id})
+            return result["CON_ROID"] if result else None
         return await self.pool.query_value(sql, {"contact_id": contact_id})
 
-    async def _get_host_roid(self, hostname: str) -> Optional[str]:
-        """Get ROID for host by name."""
+    async def _get_host_roid(self, hostname: str, conn=None) -> Optional[str]:
+        """Get ROID for host by name.
+
+        Args:
+            hostname: Host FQDN
+            conn: Optional transaction connection (uses pool if None)
+        """
         sql = "SELECT HOS_ROID FROM HOSTS WHERE LOWER(HOS_NAME) = :hostname"
+        if conn:
+            result = await conn.query_one(sql, {"hostname": hostname.lower()})
+            return result["HOS_ROID"] if result else None
         return await self.pool.query_value(sql, {"hostname": hostname.lower()})
 
     # ========================================================================
@@ -718,7 +739,7 @@ class DomainRepository:
 
             # Update registrant
             if registrant_id:
-                registrant_roid = await self._get_contact_roid(registrant_id)
+                registrant_roid = await self._get_contact_roid(registrant_id, conn)
                 if not registrant_roid:
                     raise Exception(f"Registrant contact {registrant_id} not found")
 
@@ -730,7 +751,7 @@ class DomainRepository:
             # Add contacts
             if add_contacts:
                 for contact in add_contacts:
-                    contact_roid = await self._get_contact_roid(contact["id"])
+                    contact_roid = await self._get_contact_roid(contact["id"], conn)
                     if contact_roid:
                         sql = """
                             MERGE INTO DOMAIN_CONTACTS dc
@@ -749,7 +770,7 @@ class DomainRepository:
             # Remove contacts
             if rem_contacts:
                 for contact in rem_contacts:
-                    contact_roid = await self._get_contact_roid(contact["id"])
+                    contact_roid = await self._get_contact_roid(contact["id"], conn)
                     if contact_roid:
                         await conn.execute(
                             """DELETE FROM DOMAIN_CONTACTS
@@ -762,7 +783,7 @@ class DomainRepository:
             # Add nameservers
             if add_nameservers:
                 for ns in add_nameservers:
-                    host_roid = await self._get_host_roid(ns)
+                    host_roid = await self._get_host_roid(ns, conn)
                     if host_roid:
                         sql = """
                             MERGE INTO DOMAIN_NAMESERVERS dn
@@ -780,7 +801,7 @@ class DomainRepository:
             # Remove nameservers
             if rem_nameservers:
                 for ns in rem_nameservers:
-                    host_roid = await self._get_host_roid(ns)
+                    host_roid = await self._get_host_roid(ns, conn)
                     if host_roid:
                         await conn.execute(
                             "DELETE FROM DOMAIN_NAMESERVERS WHERE DNS_DOMAIN_ROID = :domain_roid AND DNS_HOST_ROID = :host_roid",
