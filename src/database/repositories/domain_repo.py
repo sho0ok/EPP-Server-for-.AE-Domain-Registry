@@ -577,6 +577,8 @@ class DomainRepository:
 
             # Insert into DOMAINS first (without registration ID due to circular FK)
             # DOM_CANONICAL_FORM and DOM_ACTIVE_INDICATOR are NOT NULL
+            # DOM_ACTIVE_INDICATOR = '0' means active domain (per ARI schema comment:
+            # "A value of zero(0) indicates active." The ROID value indicates inactive)
             dom_sql = """
                 INSERT INTO DOMAINS (
                     DOM_ROID, DOM_NAME, DOM_LABEL, DOM_CANONICAL_FORM,
@@ -585,7 +587,7 @@ class DomainRepository:
                 ) VALUES (
                     :roid, :domain_name, :label, :canonical_form,
                     :zone, :registrant_roid, NULL,
-                    'N', 'N', :roid
+                    'N', 'N', '0'
                 )
             """
             await conn.execute(dom_sql, {
@@ -957,6 +959,12 @@ class DomainRepository:
                 )
                 await conn.execute(
                     "UPDATE REGISTRY_OBJECTS SET OBJ_STATUS = 'Pending Delete' WHERE OBJ_ROID = :roid",
+                    {"roid": roid}
+                )
+                # Mark domain as inactive by setting DOM_ACTIVE_INDICATOR to ROID
+                # (per ARI schema: '0' = active, ROID = inactive)
+                await conn.execute(
+                    "UPDATE DOMAINS SET DOM_ACTIVE_INDICATOR = :roid WHERE DOM_ROID = :roid",
                     {"roid": roid}
                 )
                 logger.info(f"Marked domain for deletion: {domain_name}")
@@ -1479,20 +1487,21 @@ class DomainRepository:
                     {"roid": domain_roid}
                 )
 
-            # Update domain record
+            # Update domain record - restore active status and clear delete date
+            # DOM_ACTIVE_INDICATOR = '0' marks domain as active
             await conn.execute(
                 """UPDATE DOMAINS
                    SET DOM_DELETE_DATE = NULL,
-                       DOM_UPDATE_DATE = :update_date,
-                       DOM_UPDATE_USER_ID = :user_id
+                       DOM_ACTIVE_INDICATOR = '0'
                    WHERE DOM_ROID = :roid""",
-                {"roid": domain_roid, "update_date": now, "user_id": user_id}
+                {"roid": domain_roid}
             )
 
-            # Update registry object
+            # Update registry object with Registered status
             await conn.execute(
                 """UPDATE REGISTRY_OBJECTS
-                   SET OBJ_UPDATE_DATE = :update_date,
+                   SET OBJ_STATUS = 'Registered',
+                       OBJ_UPDATE_DATE = :update_date,
                        OBJ_UPDATE_USER_ID = :user_id
                    WHERE OBJ_ROID = :roid""",
                 {"roid": domain_roid, "update_date": now, "user_id": user_id}
@@ -1608,13 +1617,23 @@ class DomainRepository:
             )
 
             # Update domain with immediate delete
+            # DOM_ACTIVE_INDICATOR = ROID marks domain as inactive
             await conn.execute(
                 """UPDATE DOMAINS
                    SET DOM_DELETE_DATE = :delete_date,
-                       DOM_UPDATE_DATE = :update_date,
-                       DOM_UPDATE_USER_ID = :user_id
+                       DOM_ACTIVE_INDICATOR = :roid
                    WHERE DOM_ROID = :roid""",
-                {"roid": domain_roid, "delete_date": now, "update_date": now, "user_id": user_id}
+                {"roid": domain_roid, "delete_date": now}
+            )
+
+            # Update registry object
+            await conn.execute(
+                """UPDATE REGISTRY_OBJECTS
+                   SET OBJ_STATUS = 'Policy Deleted',
+                       OBJ_UPDATE_DATE = :update_date,
+                       OBJ_UPDATE_USER_ID = :user_id
+                   WHERE OBJ_ROID = :roid""",
+                {"roid": domain_roid, "update_date": now, "user_id": user_id}
             )
 
             # Set policy deleted status
@@ -1656,13 +1675,23 @@ class DomainRepository:
                 {"roid": domain_roid, "action_date": now, "user_id": user_id}
             )
 
-            # Clear delete date
+            # Clear delete date and restore active status
+            # DOM_ACTIVE_INDICATOR = '0' marks domain as active
             await conn.execute(
                 """UPDATE DOMAINS
                    SET DOM_DELETE_DATE = NULL,
-                       DOM_UPDATE_DATE = :update_date,
-                       DOM_UPDATE_USER_ID = :user_id
+                       DOM_ACTIVE_INDICATOR = '0'
                    WHERE DOM_ROID = :roid""",
+                {"roid": domain_roid}
+            )
+
+            # Update registry object
+            await conn.execute(
+                """UPDATE REGISTRY_OBJECTS
+                   SET OBJ_STATUS = 'Registered',
+                       OBJ_UPDATE_DATE = :update_date,
+                       OBJ_UPDATE_USER_ID = :user_id
+                   WHERE OBJ_ROID = :roid""",
                 {"roid": domain_roid, "update_date": now, "user_id": user_id}
             )
 
