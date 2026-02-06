@@ -1,5 +1,5 @@
 Name:           epp-server
-Version:        1.0.3
+Version:        1.0.4
 Release:        1%{?dist}
 Summary:        EPP Server for .AE Domain Registry
 License:        MIT
@@ -100,6 +100,14 @@ fi
 systemctl daemon-reload
 
 %changelog
+* Thu Feb 06 2025 AE Registry <support@aeda.ae> - 1.0.4-1
+- Major rewrite: call ARI PL/SQL stored procedures directly
+- Use epp_domain.domain_create/check/info/delete/renew/transfer/update
+- Use epp.start_connection/login/logout/end_connection for sessions
+- New plsql_caller.py module for all Oracle stored procedure calls
+- Fix domains not appearing in ARI portal (stored procs handle internal logic)
+- Add plsql_managed flag to skip duplicate transaction logging
+
 * Mon Jan 27 2025 AE Registry <support@aeda.ae> - 1.0.3-1
 - Fix ARI database schema compatibility - 100% test pass rate
 - Fix OBJ_TYPE/OBJ_STATUS values for CHECK constraints
