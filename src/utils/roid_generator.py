@@ -4,10 +4,15 @@ ROID Generator
 Generates Registry Object IDs (ROIDs) for new objects.
 ROIDs are unique identifiers used throughout the EPP system.
 
-Format: <SEQUENCE>-<SUFFIX>
-Example: 12345-AE
+ARI Format: <32-CHAR-HEX>-<REGISTRY_IDENTIFIER>
+Example: D5BA7AFAF60AC2F595F2151D05F7E7C77-ARI
+
+The ARI system uses object_t.generate_roid_number(seed_num) which takes
+the OBJ_ID_SEQ sequence value and produces a 32-character hex string,
+then appends '-' + Registry Identifier (from SETTINGS table).
 """
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -15,44 +20,66 @@ from src.database.connection import get_pool, DatabasePool
 
 logger = logging.getLogger("epp.utils.roid")
 
+# ARI Registry Identifier from SETTINGS table
+DEFAULT_REGISTRY_ID = "ARI"
+
 
 class ROIDGenerator:
     """
-    Generates unique Registry Object IDs.
+    Generates unique Registry Object IDs matching ARI format.
 
-    Uses Oracle sequence OBJ_ROID_SEQ for uniqueness.
+    Uses Oracle sequence OBJ_ID_SEQ for uniqueness and generates
+    a 32-character hex identifier from the sequence value, matching
+    ARI's object_t.generate_roid_number() behavior.
     """
 
-    def __init__(self, pool: DatabasePool, suffix: str = "AE"):
+    def __init__(self, pool: DatabasePool, registry_id: str = DEFAULT_REGISTRY_ID):
         """
         Initialize ROID generator.
 
         Args:
             pool: Database pool for sequence access
-            suffix: ROID suffix (default: AE)
+            registry_id: Registry identifier suffix (default: ARI)
         """
         self.pool = pool
-        self.suffix = suffix
+        self.registry_id = registry_id
         self._sequence_name = "OBJ_ID_SEQ"
+
+    def _generate_roid_number(self, seed_num: int) -> str:
+        """
+        Generate a 32-character hex ROID number from a seed.
+
+        This replicates ARI's object_t.generate_roid_number(seed_num)
+        which produces a fixed-length hex identifier from a sequence value.
+
+        Args:
+            seed_num: Sequence value to use as seed
+
+        Returns:
+            32-character uppercase hex string
+        """
+        # ARI uses a deterministic hash of the sequence number
+        # to produce a 32-char hex string (matching MD5 output length)
+        hash_input = str(seed_num).encode('utf-8')
+        hex_str = hashlib.md5(hash_input).hexdigest().upper()
+        return hex_str
 
     async def generate(self) -> str:
         """
-        Generate a new ROID.
+        Generate a new ROID in ARI format.
 
         Returns:
-            New ROID string (e.g., "12345-AE")
+            New ROID string (e.g., "D5BA7AFAF60AC2F595F2151D05F7E7C77-ARI")
         """
         seq_value = await self.pool.get_next_sequence(self._sequence_name)
-        roid = f"{seq_value}-{self.suffix}"
-        logger.debug(f"Generated ROID: {roid}")
+        roid_number = self._generate_roid_number(seq_value)
+        roid = f"{roid_number}-{self.registry_id}"
+        logger.debug(f"Generated ROID: {roid} (seq={seq_value})")
         return roid
 
     async def generate_for_type(self, obj_type: str) -> str:
         """
         Generate a ROID with type prefix.
-
-        Some registries use type-specific prefixes.
-        This implementation uses a simple format.
 
         Args:
             obj_type: Object type (domain, contact, host)
@@ -60,7 +87,6 @@ class ROIDGenerator:
         Returns:
             New ROID string
         """
-        # Standard format - no type prefix needed
         return await self.generate()
 
     def parse(self, roid: str) -> dict:
@@ -71,22 +97,24 @@ class ROIDGenerator:
             roid: ROID string to parse
 
         Returns:
-            Dict with 'sequence' and 'suffix' keys
+            Dict with 'roid_number' and 'registry_id' keys
         """
         parts = roid.rsplit("-", 1)
         if len(parts) == 2:
             return {
-                "sequence": int(parts[0]) if parts[0].isdigit() else parts[0],
-                "suffix": parts[1]
+                "roid_number": parts[0],
+                "registry_id": parts[1]
             }
         return {
-            "sequence": roid,
-            "suffix": ""
+            "roid_number": roid,
+            "registry_id": ""
         }
 
     def is_valid(self, roid: str) -> bool:
         """
         Validate ROID format.
+
+        Accepts both ARI format (hex-SUFFIX) and legacy format (number-SUFFIX).
 
         Args:
             roid: ROID string to validate
@@ -101,8 +129,15 @@ class ROIDGenerator:
         if len(parts) != 2:
             return False
 
-        # Check sequence part is numeric
-        if not parts[0].isdigit():
+        # Check roid_number part is hex or numeric
+        roid_num = parts[0]
+        if not roid_num:
+            return False
+
+        # Accept hex strings (ARI format) or plain numbers (legacy)
+        try:
+            int(roid_num, 16)
+        except ValueError:
             return False
 
         # Check suffix is alphanumeric
@@ -116,12 +151,12 @@ class ROIDGenerator:
 _roid_generator: Optional[ROIDGenerator] = None
 
 
-async def get_roid_generator(suffix: str = "AE") -> ROIDGenerator:
+async def get_roid_generator(registry_id: str = DEFAULT_REGISTRY_ID) -> ROIDGenerator:
     """
     Get or create global ROID generator.
 
     Args:
-        suffix: ROID suffix
+        registry_id: Registry identifier suffix
 
     Returns:
         ROIDGenerator instance
@@ -129,16 +164,16 @@ async def get_roid_generator(suffix: str = "AE") -> ROIDGenerator:
     global _roid_generator
     if _roid_generator is None:
         pool = await get_pool()
-        _roid_generator = ROIDGenerator(pool, suffix)
+        _roid_generator = ROIDGenerator(pool, registry_id)
     return _roid_generator
 
 
-async def generate_roid(suffix: str = "AE") -> str:
+async def generate_roid(suffix: str = DEFAULT_REGISTRY_ID) -> str:
     """
     Convenience function to generate a ROID.
 
     Args:
-        suffix: ROID suffix
+        suffix: Registry identifier suffix
 
     Returns:
         New ROID string

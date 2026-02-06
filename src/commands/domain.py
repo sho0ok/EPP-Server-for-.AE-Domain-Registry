@@ -477,12 +477,38 @@ class DomainCreateHandler(ObjectCommandHandler):
             )
 
         # Set transaction data for audit logging
+        # Build audit log matching ARI format:
+        # "Domain name: X Language: Password: X Registrant: X Period: N Unit: y Contact ID: X Type: tech Nameserver: X Allow Reserved: N DNSSEC Request"
+        audit_parts = [f"Domain name: {domain_name}"]
+        audit_parts.append("Language:")  # IDN language (empty for ASCII domains)
+        audit_parts.append(f"Password: {auth_info}")
+        audit_parts.append(f"Registrant: {registrant_id}")
+        audit_parts.append(f"Period: {period}")
+        audit_parts.append(f"Unit: {unit}")
+        for contact in (contacts or []):
+            audit_parts.append(f"Contact ID: {contact.get('id', '')}")
+            audit_parts.append(f"Type: {contact.get('type', '')}")
+        for ns in (nameservers or []):
+            audit_parts.append(f"Nameserver: {ns}")
+        # Allow Reserved flag from extensions
+        allow_reserved = "N"
+        if extension_data:
+            for ext_name, ext_fields in extension_data.items():
+                if "allowReserved" in ext_fields:
+                    allow_reserved = ext_fields["allowReserved"]
+        audit_parts.append(f"Allow Reserved: {allow_reserved}")
+        # DNSSEC
+        has_dnssec = bool(command.extensions.get("secDNS"))
+        if has_dnssec:
+            audit_parts.append("DNSSEC Request")
+        audit_log = " ".join(audit_parts)
+
         # This populates TRN_AMOUNT, TRN_BALANCE, TRN_ROID, TRN_AUDIT_LOG, TRN_RATE_ID, TRN_COMMENTS in TRANSACTIONS table
         self.set_transaction_data(
             amount=rate,
             balance=new_balance,
             roid=roid,
-            audit_log=f"Domain Create: {domain_name}, Period: {period}{unit}, Registrant: {registrant_id}",
+            audit_log=audit_log,
             rate_id=rate_id,
             comments=domain_name
         )

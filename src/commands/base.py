@@ -217,7 +217,7 @@ class BaseCommandHandler(ABC):
             # Execute the actual command
             response = await self.handle(command, session)
             response_code = 1000  # Success
-            response_message = "Command completed successfully"
+            response_message = "ok"  # ARI stores 'ok' in TRN_RESPONSE_MESSAGE for code 100
 
             return response
 
@@ -457,7 +457,7 @@ class ObjectCommandHandler(BaseCommandHandler):
 
             response = await self.handle(command, session)
             response_code = 1000
-            response_message = "Command completed successfully"
+            response_message = "ok"  # ARI stores 'ok' in TRN_RESPONSE_MESSAGE for code 100
 
             return response
 
