@@ -394,20 +394,23 @@ class SessionManager:
         """
         Handle unexpected disconnection using ARI's stored procedures.
 
+        Only cleans up if logout() hasn't already been called.
+        After logout(), session.authenticated is False and session.session_id is None.
+
         Args:
             session: Session info object
             reason: Disconnect reason
         """
-        await self._get_repos()
-
-        if session.session_id:
-            try:
-                await self._transaction_repo.end_session(
-                    session_id=session.session_id,
-                    reason=reason
+        # If already logged out, nothing to do
+        if not session.authenticated and session.session_id is None:
+            if session.username:
+                logger.info(
+                    f"User {session.username} disconnected from {session.client_ip}: {reason}"
                 )
-            except Exception as e:
-                logger.error(f"Failed to end session on disconnect: {e}")
+            return
+
+        # Unexpected disconnect (no logout command received)
+        await self._get_repos()
 
         if session.connection_id:
             try:
@@ -418,13 +421,6 @@ class SessionManager:
                 )
             except Exception as e:
                 logger.warning(f"epp.end_connection() failed on disconnect: {e}")
-                try:
-                    await self._transaction_repo.end_connection(
-                        conn_id=session.connection_id,
-                        reason=reason
-                    )
-                except Exception as e2:
-                    logger.error(f"Manual end_connection also failed: {e2}")
 
         if session.username:
             logger.info(

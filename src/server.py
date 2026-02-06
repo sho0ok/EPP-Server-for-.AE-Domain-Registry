@@ -328,18 +328,7 @@ class EPPClientHandler:
             self.session_id = self.session.session_id
             self.connection_id = self.session.connection_id
 
-            # Log the login transaction
-            trn_id = await session_mgr.log_command(
-                session=self.session,
-                command="Login",
-                client_ref=cl_trid
-            )
-            await session_mgr.complete_command(
-                trn_id=trn_id,
-                response_code=1000,
-                response_message="Command completed successfully"
-            )
-
+            # Note: epp.login() already logs the login transaction internally
             logger.info(f"Login successful: {client_id} (account {self.account_id}) from {self.client_ip}")
 
             return self.response_builder.build_response(
@@ -362,22 +351,10 @@ class EPPClientHandler:
 
         cl_trid = command.client_transaction_id
 
-        # Log the logout transaction before clearing session
+        # End the session properly - epp.logout() logs the transaction internally
         if self.session and self.session.session_id:
             session_mgr = get_session_manager()
-            trn_id = await session_mgr.log_command(
-                session=self.session,
-                command="Logout",
-                client_ref=cl_trid
-            )
-            await session_mgr.complete_command(
-                trn_id=trn_id,
-                response_code=1500,
-                response_message="Command completed successfully; ending session"
-            )
-
-            # End the session properly
-            await session_mgr.logout(self.session, "Normal logout")
+            await session_mgr.logout(self.session, "Normal logout", cltrid=cl_trid)
 
         # Clear session state
         self.authenticated = False
