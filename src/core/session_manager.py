@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from src.database.repositories.transaction_repo import get_transaction_repo, TransactionRepository
 from src.database.repositories.account_repo import get_account_repo, AccountRepository
+from src.database.plsql_caller import get_plsql_caller, EPPProcedureCaller
 from src.utils.rate_limiter import SessionStats, get_rate_limiter
 
 logger = logging.getLogger("epp.session")
@@ -169,7 +170,11 @@ class SessionManager:
         extension_uris: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Authenticate a user and establish session.
+        Authenticate a user and establish session using ARI's stored procedures.
+
+        Calls epp.start_connection() then epp.login() - the same flow
+        the old C++ EPP server used. This ensures the connection and session
+        records are created exactly as ARI expects.
 
         Args:
             session: Session info object
@@ -187,119 +192,170 @@ class SessionManager:
                 - message: Response message
         """
         await self._get_repos()
+        plsql = await get_plsql_caller()
 
-        # Validate credentials
-        user_data = await self._account_repo.validate_credentials(username, password)
-
-        if not user_data:
-            session.login_failures += 1
-            logger.warning(
-                f"Login failed for {username} from {session.client_ip} "
-                f"(attempt {session.login_failures})"
+        # Step 1: Call epp.start_connection() to register the connection
+        try:
+            rc, connection_id = await plsql.start_connection(
+                username=username,
+                server_name=self.server_name,
+                server_ip=self._server_ip,
+                server_port=self.server_port,
+                client_ip=session.client_ip,
+                client_port=session.client_port
             )
-            return {
-                "success": False,
-                "code": 2200,
-                "message": "Authentication error"
-            }
 
-        account = user_data["account"]
-        account_id = account["ACC_ID"]
-        user_id = user_data["USR_ID"]
-
-        # Check IP whitelist
-        if not await self._account_repo.check_ip_whitelist(account_id, session.client_ip):
-            logger.warning(
-                f"IP {session.client_ip} not whitelisted for account {account_id}"
+            if connection_id is None or rc != 0:
+                logger.warning(
+                    f"epp.start_connection() failed for {username}: rc={rc}"
+                )
+                # Fallback to manual connection creation
+                connection_id = await self._transaction_repo.create_connection(
+                    account_id=0,
+                    user_id=0,
+                    server_name=self.server_name,
+                    server_ip=self._server_ip,
+                    server_port=self.server_port,
+                    client_ip=session.client_ip,
+                    client_port=session.client_port
+                )
+        except Exception as e:
+            logger.warning(f"epp.start_connection() error: {e}, falling back to manual")
+            connection_id = await self._transaction_repo.create_connection(
+                account_id=0,
+                user_id=0,
+                server_name=self.server_name,
+                server_ip=self._server_ip,
+                server_port=self.server_port,
+                client_ip=session.client_ip,
+                client_port=session.client_port
             )
-            return {
-                "success": False,
-                "code": 2200,
-                "message": "Authentication error: IP address not authorized"
-            }
 
-        # Check connection limit
-        if not await self._account_repo.can_connect(account_id):
-            logger.warning(
-                f"Connection limit exceeded for account {account_id}"
-            )
-            return {
-                "success": False,
-                "code": 2502,
-                "message": "Session limit exceeded; server closing connection"
-            }
-
-        # Create connection record
-        connection_id = await self._transaction_repo.create_connection(
-            account_id=account_id,
-            user_id=user_id,
-            server_name=self.server_name,
-            server_ip=self._server_ip,
-            server_port=self.server_port,
-            client_ip=session.client_ip,
-            client_port=session.client_port
-        )
-
-        # Create session record
-        session_id = await self._transaction_repo.create_session(
-            user_id=user_id,
-            connection_id=connection_id,
-            client_ip=session.client_ip,
-            lang=language,
-            object_uris=",".join(object_uris) if object_uris else None,
-            extension_uris=",".join(extension_uris) if extension_uris else None
-        )
-
-        # Update session info
         session.connection_id = connection_id
-        session.session_id = session_id
-        session.user_id = user_id
-        session.account_id = account_id
-        session.client_id = account["ACC_CLIENT_ID"] or username
-        session.username = username
-        session.authenticated = True
-        session.login_time = datetime.utcnow()
-        session.last_activity = datetime.utcnow()
-        session.version = version
-        session.language = language
-        session.object_uris = object_uris or []
-        session.extension_uris = extension_uris or []
 
-        logger.info(
-            f"User {username} (account {account_id}) logged in from {session.client_ip}"
-        )
+        # Step 2: Call epp.login() to authenticate and create session
+        try:
+            login_result = await plsql.login(
+                connection_id=connection_id,
+                clid=username,
+                pw=password,
+                newpw=None,
+                version=version,
+                lang=language,
+                obj_uris=object_uris or [],
+                ext_uris=extension_uris or [],
+                cltrid=None  # Login doesn't have a clTRID from our side
+            )
 
-        return {
-            "success": True,
-            "code": 1000,
-            "message": "Command completed successfully"
-        }
+            response_code = login_result.get("response_code", 2400)
+            session_id = login_result.get("session_id")
+
+            if response_code >= 2000 or session_id is None:
+                session.login_failures += 1
+                logger.warning(
+                    f"epp.login() failed for {username}: code={response_code}, "
+                    f"msg={login_result.get('response_message', '')}"
+                )
+                return {
+                    "success": False,
+                    "code": response_code,
+                    "message": login_result.get("response_message", "Authentication error")
+                }
+
+            # Login succeeded - get user/account info for session
+            user_data = await self._account_repo.validate_credentials(username, password)
+            if user_data:
+                account = user_data["account"]
+                account_id = account["ACC_ID"]
+                user_id = user_data["USR_ID"]
+                client_id = account.get("ACC_CLIENT_ID") or username
+            else:
+                # Shouldn't happen since epp.login() succeeded
+                account_id = None
+                user_id = None
+                client_id = username
+
+            # Update session info
+            session.session_id = session_id
+            session.user_id = user_id
+            session.account_id = account_id
+            session.client_id = client_id
+            session.username = username
+            session.authenticated = True
+            session.login_time = datetime.utcnow()
+            session.last_activity = datetime.utcnow()
+            session.version = version
+            session.language = language
+            session.object_uris = object_uris or []
+            session.extension_uris = extension_uris or []
+
+            logger.info(
+                f"User {username} (account {account_id}) logged in via epp.login() "
+                f"from {session.client_ip}, session_id={session_id}"
+            )
+
+            return {
+                "success": True,
+                "code": 1000,
+                "message": "Command completed successfully"
+            }
+
+        except Exception as e:
+            session.login_failures += 1
+            logger.error(f"epp.login() error for {username}: {e}")
+            return {
+                "success": False,
+                "code": 2200,
+                "message": f"Authentication error: {str(e)}"
+            }
 
     async def logout(
         self,
         session: SessionInfo,
-        reason: str = "Normal logout"
+        reason: str = "Normal logout",
+        cltrid: Optional[str] = None
     ) -> None:
         """
-        End a session gracefully.
+        End a session gracefully using ARI's epp.logout() and epp.end_connection().
 
         Args:
             session: Session info object
             reason: Logout reason for logging
+            cltrid: Client transaction ID
         """
         await self._get_repos()
 
-        if session.session_id:
-            await self._transaction_repo.end_session(
-                session_id=session.session_id,
-                reason=reason
-            )
+        # Use epp.logout() if we have connection and session
+        if session.connection_id and session.session_id:
+            try:
+                plsql = await get_plsql_caller()
+                await plsql.logout(
+                    connection_id=session.connection_id,
+                    session_id=session.session_id,
+                    cltrid=cltrid
+                )
+            except Exception as e:
+                logger.warning(f"epp.logout() failed, falling back: {e}")
+                # Fallback to manual session/connection end
+                await self._transaction_repo.end_session(
+                    session_id=session.session_id,
+                    reason=reason
+                )
 
+        # End the connection
         if session.connection_id:
-            await self._transaction_repo.end_connection(
-                conn_id=session.connection_id,
-                reason=reason
-            )
+            try:
+                plsql = await get_plsql_caller()
+                await plsql.end_connection(
+                    connection_id=session.connection_id,
+                    reason=reason
+                )
+            except Exception as e:
+                logger.warning(f"epp.end_connection() failed, falling back: {e}")
+                await self._transaction_repo.end_connection(
+                    conn_id=session.connection_id,
+                    reason=reason
+                )
 
         logger.info(
             f"User {session.username} logged out from {session.client_ip}: {reason}"
@@ -315,7 +371,7 @@ class SessionManager:
         reason: str = "Connection closed"
     ) -> None:
         """
-        Handle unexpected disconnection.
+        Handle unexpected disconnection using ARI's stored procedures.
 
         Args:
             session: Session info object
@@ -324,16 +380,30 @@ class SessionManager:
         await self._get_repos()
 
         if session.session_id:
-            await self._transaction_repo.end_session(
-                session_id=session.session_id,
-                reason=reason
-            )
+            try:
+                await self._transaction_repo.end_session(
+                    session_id=session.session_id,
+                    reason=reason
+                )
+            except Exception as e:
+                logger.error(f"Failed to end session on disconnect: {e}")
 
         if session.connection_id:
-            await self._transaction_repo.end_connection(
-                conn_id=session.connection_id,
-                reason=reason
-            )
+            try:
+                plsql = await get_plsql_caller()
+                await plsql.end_connection(
+                    connection_id=session.connection_id,
+                    reason=reason
+                )
+            except Exception as e:
+                logger.warning(f"epp.end_connection() failed on disconnect: {e}")
+                try:
+                    await self._transaction_repo.end_connection(
+                        conn_id=session.connection_id,
+                        reason=reason
+                    )
+                except Exception as e2:
+                    logger.error(f"Manual end_connection also failed: {e2}")
 
         if session.username:
             logger.info(

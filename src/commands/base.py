@@ -361,6 +361,11 @@ class ObjectCommandHandler(BaseCommandHandler):
     # Object type (domain, contact, host)
     object_type: str = "unknown"
 
+    # When True, the PL/SQL stored procedure handles transaction logging
+    # internally (via transaction_t.start_transaction/end_transaction).
+    # The execute() wrapper skips its own transaction logging to avoid duplicates.
+    plsql_managed: bool = False
+
     def __init__(self):
         """Initialize handler with transaction metadata storage."""
         super().__init__()
@@ -417,14 +422,51 @@ class ObjectCommandHandler(BaseCommandHandler):
         """
         Execute with object-specific logging.
 
-        Extracts ROID for transaction logging when available.
-        Passes billing metadata (amount, balance, audit_log) to transaction log.
+        If plsql_managed is True, the PL/SQL stored procedure handles
+        transaction logging internally, so we skip our own logging.
+        Otherwise, extracts ROID and logs transactions as before.
         """
         cl_trid = command.client_transaction_id
+
+        # For PL/SQL-managed commands, skip our transaction logging
+        # The stored procedure (e.g., epp_domain.domain_create) handles
+        # everything internally including transaction_t management.
+        if self.plsql_managed:
+            try:
+                if self.requires_auth and not session.authenticated:
+                    raise AuthenticationError("Command use error: not logged in")
+
+                response = await self.handle(command, session)
+                return response
+
+            except CommandError as e:
+                logger.warning(
+                    f"Command {self.object_type}:{self.command_name} failed: "
+                    f"[{e.code}] {e.message}"
+                )
+                return self.response_builder.build_error(
+                    code=e.code,
+                    message=e.message,
+                    cl_trid=cl_trid,
+                    reason=e.reason,
+                    value=e.value
+                )
+
+            except Exception as e:
+                logger.exception(
+                    f"Command {self.object_type}:{self.command_name} error: {e}"
+                )
+                return self.response_builder.build_error(
+                    code=2400,
+                    message="Command failed",
+                    cl_trid=cl_trid
+                )
+
+        # Non-PL/SQL path: manual transaction logging
         start_time = datetime.utcnow()
         trn_id = None
         response_code = 2400
-        response_message = None  # Track error message for logging
+        response_message = None
         roid = None
 
         # Reset transaction metadata for this execution
