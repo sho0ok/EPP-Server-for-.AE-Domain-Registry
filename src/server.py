@@ -371,37 +371,10 @@ class EPPClientHandler:
         )
 
     async def _handle_poll(self, command: EPPCommand) -> bytes:
-        """Handle poll command."""
-        cl_trid = command.client_transaction_id
-        op = command.data.get("op", "req")
-
-        if op == "req":
-            # TODO: Check for pending messages
-            return self.response_builder.build_response(
-                code=1300,
-                message="Command completed successfully; no messages",
-                cl_trid=cl_trid
-            )
-        elif op == "ack":
-            msg_id = command.data.get("msgID")
-            if not msg_id:
-                return self.response_builder.build_error(
-                    code=2003,
-                    message="Required parameter missing: msgID",
-                    cl_trid=cl_trid
-                )
-            # TODO: Acknowledge message
-            return self.response_builder.build_response(
-                code=1000,
-                message="Command completed successfully",
-                cl_trid=cl_trid
-            )
-        else:
-            return self.response_builder.build_error(
-                code=2005,
-                message=f"Parameter value syntax error: invalid op '{op}'",
-                cl_trid=cl_trid
-            )
+        """Handle poll command via PollHandler."""
+        from src.commands.session import PollHandler
+        handler = PollHandler()
+        return await handler.handle(command, self.session)
 
     async def _handle_object_command(self, command: EPPCommand) -> bytes:
         """
