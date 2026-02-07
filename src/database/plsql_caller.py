@@ -2760,7 +2760,7 @@ class EPPProcedureCaller:
                     ELSIF l_resdata.domain_pandata IS NOT NULL THEN
                         :resdata_type := 'domain_pandata';
                         IF l_resdata.domain_pandata.name IS NOT NULL THEN
-                            :dom_pan_name := l_resdata.domain_pandata.name.name;
+                            :dom_pan_name := l_resdata.domain_pandata.name.name.value;
                             :dom_pan_result := l_resdata.domain_pandata.name.paresult;
                         END IF;
                         IF l_resdata.domain_pandata.paTRID IS NOT NULL THEN
