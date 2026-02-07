@@ -494,15 +494,20 @@ class DomainUpdateHandler(ObjectCommandHandler):
         add_statuses_raw = add_data.get("statuses", [])
         rem_statuses_raw = rem_data.get("statuses", [])
 
-        # Normalize statuses
-        add_statuses = [
-            s.get("s") if isinstance(s, dict) else s for s in add_statuses_raw
-        ]
-        rem_statuses = [
-            s.get("s") if isinstance(s, dict) else s for s in rem_statuses_raw
-        ]
-        add_statuses = [s for s in add_statuses if s]
-        rem_statuses = [s for s in rem_statuses if s]
+        # Normalize statuses - preserve full dict with s, lang, reason
+        add_statuses = []
+        for s in add_statuses_raw:
+            if isinstance(s, dict) and s.get("s"):
+                add_statuses.append(s)
+            elif isinstance(s, str) and s:
+                add_statuses.append({"s": s, "lang": None, "reason": None})
+
+        rem_statuses = []
+        for s in rem_statuses_raw:
+            if isinstance(s, dict) and s.get("s"):
+                rem_statuses.append(s)
+            elif isinstance(s, str) and s:
+                rem_statuses.append({"s": s, "lang": None, "reason": None})
 
         registrant_id = chg_data.get("registrant")
         auth_info = chg_data.get("authInfo")

@@ -1318,13 +1318,26 @@ class EPPProcedureCaller:
             items.append(f"epp_dom_contact_t('{cid}', '{ctype}')")
         return f"epp_dom_contact_list_t({', '.join(items)})"
 
-    def _build_status_list_literal(self, statuses: Optional[List[str]]) -> str:
-        """Build epp_status_list_t constructor literal."""
+    def _build_status_list_literal(self, statuses) -> str:
+        """Build epp_status_list_t constructor literal.
+
+        Args:
+            statuses: List of status dicts {"s": "clientHold", "lang": "en", "reason": "text"}
+                     or list of plain strings ["clientHold"]
+        """
         if not statuses:
             return "epp_status_list_t()"
         items = []
         for s in statuses:
-            items.append(f"epp_status_t('{self._escape_sql(s)}', NULL, NULL)")
+            if isinstance(s, dict):
+                value = self._escape_sql(s.get("s", ""))
+                lang = s.get("lang")
+                reason = s.get("reason")
+                lang_lit = f"'{self._escape_sql(lang)}'" if lang else "NULL"
+                reason_lit = f"'{self._escape_sql(reason)}'" if reason else "NULL"
+                items.append(f"epp_status_t('{value}', {lang_lit}, {reason_lit})")
+            else:
+                items.append(f"epp_status_t('{self._escape_sql(s)}', NULL, NULL)")
         return f"epp_status_list_t({', '.join(items)})"
 
     def _build_extension_list_literal(self, extensions: Optional[List[Dict[str, Any]]]) -> str:
