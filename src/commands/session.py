@@ -248,12 +248,6 @@ class PollHandler(BaseCommandHandler):
 
         from src.database.plsql_caller import get_plsql_caller
         plsql = await get_plsql_caller()
-
-        logger.info(
-            f"Poll: conn_id={session.connection_id}, ses_id={session.session_id}, "
-            f"acc_id={session.account_id}, user={session.username}, op={op}, msgid={msgid}"
-        )
-
         result = await plsql.poll(
             connection_id=session.connection_id,
             session_id=session.session_id,
@@ -261,8 +255,6 @@ class PollHandler(BaseCommandHandler):
             op=op,
             msgid=msgid
         )
-
-        logger.info(f"Poll result: {result}")
 
         response_code = result.get("response_code", 2400)
 
