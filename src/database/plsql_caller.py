@@ -1418,6 +1418,1256 @@ class EPPProcedureCaller:
 
         return f"dnssec_request_t({urgent}, {remove_all}, {max_sig_life}, {ds_literal}, {kd_literal})"
 
+    def _build_addr_list_literal(self, addrs: Optional[List[Dict[str, str]]]) -> str:
+        """Build epp_addr_list_t constructor literal for host IP addresses."""
+        if not addrs:
+            return "epp_addr_list_t()"
+        items = []
+        for a in addrs:
+            address = self._escape_sql(a.get("addr", ""))
+            ip_type = self._escape_sql(a.get("ip", "v4"))
+            items.append(f"epp_addr_t('{address}', '{ip_type}')")
+        return f"epp_addr_list_t({', '.join(items)})"
+
+    def _build_e164_literal(self, number: Optional[str], ext: Optional[str] = None) -> str:
+        """Build epp_e164_t constructor literal for voice/fax."""
+        if not number:
+            return "epp_e164_t(NULL, NULL)"
+        num_lit = f"'{self._escape_sql(number)}'"
+        ext_lit = f"'{self._escape_sql(ext)}'" if ext else "NULL"
+        return f"epp_e164_t({num_lit}, {ext_lit})"
+
+    def _build_postalinfo_literal(self, postal: Optional[Dict[str, Any]]) -> str:
+        """Build epp_postalinfo_t constructor literal for contact create."""
+        if not postal:
+            return "NULL"
+        name = f"'{self._escape_sql(postal.get('name', ''))}'" if postal.get('name') else "NULL"
+        org = f"'{self._escape_sql(postal.get('org', ''))}'" if postal.get('org') else "NULL"
+        streets = postal.get("street", [])
+        if isinstance(streets, str):
+            streets = [streets]
+        s1 = f"'{self._escape_sql(streets[0])}'" if len(streets) > 0 else "NULL"
+        s2 = f"'{self._escape_sql(streets[1])}'" if len(streets) > 1 else "NULL"
+        s3 = f"'{self._escape_sql(streets[2])}'" if len(streets) > 2 else "NULL"
+        city = f"'{self._escape_sql(postal.get('city', ''))}'" if postal.get('city') else "NULL"
+        state = f"'{self._escape_sql(postal.get('sp', ''))}'" if postal.get('sp') else "NULL"
+        pc = f"'{self._escape_sql(postal.get('pc', ''))}'" if postal.get('pc') else "NULL"
+        cc = f"'{self._escape_sql(postal.get('cc', ''))}'" if postal.get('cc') else "NULL"
+        return f"epp_postalinfo_t({name}, {org}, {s1}, {s2}, {s3}, {city}, {state}, {pc}, {cc})"
+
+    def _build_chg_postalinfo_literal(self, postal: Optional[Dict[str, Any]]) -> str:
+        """Build epp_chg_postalinfo_t constructor literal for contact update."""
+        if not postal:
+            return "NULL"
+        name = f"epp_postalline_t('{self._escape_sql(postal['name'])}')" if postal.get('name') else "NULL"
+        org = f"epp_postalline_t('{self._escape_sql(postal['org'])}')" if postal.get('org') else "NULL"
+        streets = postal.get("street", [])
+        if isinstance(streets, str):
+            streets = [streets]
+        s1 = f"'{self._escape_sql(streets[0])}'" if len(streets) > 0 else "NULL"
+        s2 = f"'{self._escape_sql(streets[1])}'" if len(streets) > 1 else "NULL"
+        s3 = f"'{self._escape_sql(streets[2])}'" if len(streets) > 2 else "NULL"
+        city = f"'{self._escape_sql(postal.get('city', ''))}'" if postal.get('city') else "NULL"
+        state = f"'{self._escape_sql(postal.get('sp', ''))}'" if postal.get('sp') else "NULL"
+        pc = f"'{self._escape_sql(postal.get('pc', ''))}'" if postal.get('pc') else "NULL"
+        cc = f"'{self._escape_sql(postal.get('cc', ''))}'" if postal.get('cc') else "NULL"
+        addr = f"epp_con_addr_t({s1}, {s2}, {s3}, {city}, {state}, {pc}, {cc})"
+        return f"epp_chg_postalinfo_t({name}, {org}, {addr})"
+
+    def _build_authinfo_literal(self, pw: Optional[str]) -> str:
+        """Build epp_authinfo_t constructor literal."""
+        if not pw:
+            return "epp_authinfo_t()"
+        return f"epp_authinfo_t('{self._escape_sql(pw)}', NULL)"
+
+    # ========================================================================
+    # Host Operations (epp_host package)
+    # ========================================================================
+
+    async def host_check(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        hostnames: List[str]
+    ) -> Dict[str, Any]:
+        """Call epp_host.host_check() to check host availability."""
+        hosts_literal = self._build_string_list_literal(hostnames)
+        max_results = min(len(hostnames), 20)
+
+        result_vars = []
+        for i in range(max_results):
+            result_vars.append(f"""
+                IF l_chkdata IS NOT NULL AND l_chkdata.COUNT >= {i + 1} THEN
+                    :name_{i} := l_chkdata({i + 1}).name;
+                    :avail_{i} := l_chkdata({i + 1}).avail;
+                    :reason_{i} := l_chkdata({i + 1}).reason;
+                END IF;
+            """)
+
+        result_extraction = "\n".join(result_vars)
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_chkdata  epp_hos_chkdata_t;
+                l_hosts    epp_hos_list_t := {hosts_literal};
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_host.host_check(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    hosts         => l_hosts,
+                    response      => l_response,
+                    chkdata       => l_chkdata
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+                :result_count := CASE WHEN l_chkdata IS NOT NULL THEN l_chkdata.COUNT ELSE 0 END;
+
+                {result_extraction}
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "result_count": cursor.var(int)
+            }
+            for i in range(max_results):
+                binds[f"name_{i}"] = cursor.var(str, 255)
+                binds[f"avail_{i}"] = cursor.var(str, 1)
+                binds[f"reason_{i}"] = cursor.var(str, 32)
+
+            cursor.execute(sql, binds)
+            conn.commit()
+
+            response_code = self._extract_var(binds["response_code"], 2400)
+            result_count = self._extract_var(binds["result_count"], 0)
+
+            results = []
+            for i in range(min(result_count, max_results)):
+                name = self._extract_var(binds[f"name_{i}"], "")
+                avail = self._extract_var(binds[f"avail_{i}"], "0")
+                reason = self._extract_var(binds[f"reason_{i}"], None)
+                results.append({
+                    "name": name,
+                    "avail": avail == "1",
+                    "reason": reason
+                })
+
+            cursor.close()
+
+            return {
+                "response_code": response_code,
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "results": results
+            }
+
+    async def host_create(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str,
+        addresses: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """Call epp_host.host_create() to create a new host."""
+        addr_literal = self._build_addr_list_literal(addresses)
+
+        sql = f"""
+            DECLARE
+                l_response     epp_response_t;
+                l_cre_response epp_hos_cre_response_t;
+                l_addr         epp_addr_list_t := {addr_literal};
+                l_code         NUMBER;
+                l_msg          VARCHAR2(4000);
+                l_svtrid       VARCHAR2(64);
+            BEGIN
+                epp_host.host_create(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    addr          => l_addr,
+                    response      => l_response,
+                    cre_response  => l_cre_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+
+                IF l_cre_response IS NOT NULL THEN
+                    :cr_name := l_cre_response.dns_form;
+                    :cr_date := TO_CHAR(l_cre_response.crdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                END IF;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "cr_name": cursor.var(str, 255),
+                "cr_date": cursor.var(str, 30)
+            }
+
+            try:
+                cursor.execute(sql, binds)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"epp_host.host_create() failed: {e}")
+                raise
+
+            result = {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "cr_name": self._extract_var(binds["cr_name"], name),
+                "cr_date": self._extract_var(binds["cr_date"], None),
+            }
+            cursor.close()
+
+            logger.info(
+                f"epp_host.host_create({name}) returned code={result['response_code']}"
+            )
+            return result
+
+    async def host_info(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str
+    ) -> Dict[str, Any]:
+        """Call epp_host.host_info() to get host information."""
+        max_statuses = 10
+        max_addrs = 13
+
+        status_vars = []
+        for i in range(max_statuses):
+            status_vars.append(f"""
+                IF l_infdata.status IS NOT NULL AND l_infdata.status.COUNT >= {i + 1} THEN
+                    :st_s_{i} := l_infdata.status({i + 1}).value;
+                    :st_lang_{i} := l_infdata.status({i + 1}).language;
+                    :st_text_{i} := l_infdata.status({i + 1}).text;
+                END IF;
+            """)
+
+        addr_vars = []
+        for i in range(max_addrs):
+            addr_vars.append(f"""
+                IF l_infdata.addr IS NOT NULL AND l_infdata.addr.COUNT >= {i + 1} THEN
+                    :addr_ip_{i} := l_infdata.addr({i + 1}).ip;
+                    :addr_addr_{i} := l_infdata.addr({i + 1}).address;
+                END IF;
+            """)
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_infdata  epp_hos_infdata_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_host.host_info(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    response      => l_response,
+                    infdata       => l_infdata
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+
+                IF l_infdata IS NOT NULL THEN
+                    :inf_name := l_infdata.name;
+                    :inf_roid := l_infdata.roid;
+                    :inf_clid := l_infdata.clid;
+                    :inf_crid := l_infdata.crid;
+                    :inf_crdate := TO_CHAR(l_infdata.crdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :inf_upid := l_infdata.upid;
+                    :inf_update := TO_CHAR(l_infdata.up_date, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :inf_trdate := TO_CHAR(l_infdata.trdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :status_count := CASE WHEN l_infdata.status IS NOT NULL THEN l_infdata.status.COUNT ELSE 0 END;
+                    :addr_count := CASE WHEN l_infdata.addr IS NOT NULL THEN l_infdata.addr.COUNT ELSE 0 END;
+
+                    {"".join(status_vars)}
+                    {"".join(addr_vars)}
+                END IF;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "inf_name": cursor.var(str, 255),
+                "inf_roid": cursor.var(str, 89),
+                "inf_clid": cursor.var(str, 16),
+                "inf_crid": cursor.var(str, 16),
+                "inf_crdate": cursor.var(str, 30),
+                "inf_upid": cursor.var(str, 16),
+                "inf_update": cursor.var(str, 30),
+                "inf_trdate": cursor.var(str, 30),
+                "status_count": cursor.var(int),
+                "addr_count": cursor.var(int),
+            }
+            for i in range(max_statuses):
+                binds[f"st_s_{i}"] = cursor.var(str, 24)
+                binds[f"st_lang_{i}"] = cursor.var(str, 20)
+                binds[f"st_text_{i}"] = cursor.var(str, 100)
+            for i in range(max_addrs):
+                binds[f"addr_ip_{i}"] = cursor.var(str, 2)
+                binds[f"addr_addr_{i}"] = cursor.var(str, 45)
+
+            cursor.execute(sql, binds)
+            conn.commit()
+
+            response_code = self._extract_var(binds["response_code"], 2400)
+
+            statuses = []
+            status_count = self._extract_var(binds["status_count"], 0)
+            for i in range(min(status_count, max_statuses)):
+                s = self._extract_var(binds[f"st_s_{i}"], None)
+                if s:
+                    statuses.append({
+                        "s": s,
+                        "lang": self._extract_var(binds[f"st_lang_{i}"], None),
+                        "reason": self._extract_var(binds[f"st_text_{i}"], None)
+                    })
+
+            addrs = []
+            addr_count = self._extract_var(binds["addr_count"], 0)
+            for i in range(min(addr_count, max_addrs)):
+                addr = self._extract_var(binds[f"addr_addr_{i}"], None)
+                if addr:
+                    addrs.append({
+                        "addr": addr,
+                        "ip": self._extract_var(binds[f"addr_ip_{i}"], "v4")
+                    })
+
+            cursor.close()
+
+            return {
+                "response_code": response_code,
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "name": self._extract_var(binds["inf_name"], ""),
+                "roid": self._extract_var(binds["inf_roid"], ""),
+                "statuses": statuses,
+                "addrs": addrs,
+                "clID": self._extract_var(binds["inf_clid"], ""),
+                "crID": self._extract_var(binds["inf_crid"], ""),
+                "crDate": self._extract_var(binds["inf_crdate"], None),
+                "upID": self._extract_var(binds["inf_upid"], None),
+                "upDate": self._extract_var(binds["inf_update"], None),
+                "trDate": self._extract_var(binds["inf_trdate"], None),
+            }
+
+    async def host_update(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str,
+        add_addresses: Optional[List[Dict[str, str]]] = None,
+        rem_addresses: Optional[List[Dict[str, str]]] = None,
+        add_statuses: Optional[List] = None,
+        rem_statuses: Optional[List] = None,
+        new_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Call epp_host.host_update() to update a host."""
+        add_addr_lit = self._build_addr_list_literal(add_addresses)
+        add_status_lit = self._build_status_list_literal(add_statuses) if add_statuses else "epp_status_list_t()"
+        rem_addr_lit = self._build_addr_list_literal(rem_addresses)
+        rem_status_lit = self._build_status_list_literal(rem_statuses) if rem_statuses else "epp_status_list_t()"
+
+        if new_name:
+            chg_lit = f"epp_hos_chg_t(eppcom_label_t('{self._escape_sql(new_name)}'))"
+        else:
+            chg_lit = "epp_hos_chg_t(NULL)"
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_add      epp_hos_add_rem_t := epp_hos_add_rem_t({add_addr_lit}, {add_status_lit});
+                l_rem      epp_hos_add_rem_t := epp_hos_add_rem_t({rem_addr_lit}, {rem_status_lit});
+                l_chg      epp_hos_chg_t := {chg_lit};
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_host.host_update(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    add_fields    => l_add,
+                    rem_fields    => l_rem,
+                    chg_fields    => l_chg,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    async def host_delete(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str
+    ) -> Dict[str, Any]:
+        """Call epp_host.host_delete() to delete a host."""
+        sql = """
+            DECLARE
+                l_response epp_response_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_host.host_delete(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    # ========================================================================
+    # Contact Operations (epp_contact package)
+    # ========================================================================
+
+    async def contact_check(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        contact_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Call epp_contact.contact_check() to check contact availability."""
+        contacts_literal = self._build_typed_string_list("epp_con_list_t", contact_ids)
+        max_results = min(len(contact_ids), 20)
+
+        result_vars = []
+        for i in range(max_results):
+            result_vars.append(f"""
+                IF l_chkdata IS NOT NULL AND l_chkdata.COUNT >= {i + 1} THEN
+                    :id_{i} := l_chkdata({i + 1}).id;
+                    :avail_{i} := l_chkdata({i + 1}).avail;
+                    :reason_{i} := l_chkdata({i + 1}).reason;
+                END IF;
+            """)
+
+        result_extraction = "\n".join(result_vars)
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_chkdata  epp_con_chkdata_t;
+                l_contacts epp_con_list_t := {contacts_literal};
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_contact.contact_check(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    contacts      => l_contacts,
+                    response      => l_response,
+                    chkdata       => l_chkdata
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+                :result_count := CASE WHEN l_chkdata IS NOT NULL THEN l_chkdata.COUNT ELSE 0 END;
+
+                {result_extraction}
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "result_count": cursor.var(int)
+            }
+            for i in range(max_results):
+                binds[f"id_{i}"] = cursor.var(str, 32)
+                binds[f"avail_{i}"] = cursor.var(str, 1)
+                binds[f"reason_{i}"] = cursor.var(str, 32)
+
+            cursor.execute(sql, binds)
+            conn.commit()
+
+            response_code = self._extract_var(binds["response_code"], 2400)
+            result_count = self._extract_var(binds["result_count"], 0)
+
+            results = []
+            for i in range(min(result_count, max_results)):
+                cid = self._extract_var(binds[f"id_{i}"], "")
+                avail = self._extract_var(binds[f"avail_{i}"], "0")
+                reason = self._extract_var(binds[f"reason_{i}"], None)
+                results.append({
+                    "id": cid,
+                    "avail": avail == "1",
+                    "reason": reason
+                })
+
+            cursor.close()
+
+            return {
+                "response_code": response_code,
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "results": results
+            }
+
+    async def contact_create(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        contact_id: str,
+        postalinfo_int: Optional[Dict[str, Any]] = None,
+        postalinfo_loc: Optional[Dict[str, Any]] = None,
+        voice: Optional[str] = None,
+        voice_ext: Optional[str] = None,
+        fax: Optional[str] = None,
+        fax_ext: Optional[str] = None,
+        email: str = "",
+        auth_info: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Call epp_contact.contact_create() to create a new contact."""
+        pi_int_lit = self._build_postalinfo_literal(postalinfo_int)
+        pi_loc_lit = self._build_postalinfo_literal(postalinfo_loc)
+        voice_lit = self._build_e164_literal(voice, voice_ext)
+        fax_lit = self._build_e164_literal(fax, fax_ext)
+        authinfo_lit = self._build_authinfo_literal(auth_info)
+
+        sql = f"""
+            DECLARE
+                l_response       epp_response_t;
+                l_postalinfo_int epp_postalinfo_t := {pi_int_lit};
+                l_postalinfo_loc epp_postalinfo_t := {pi_loc_lit};
+                l_voice          epp_e164_t := {voice_lit};
+                l_fax            epp_e164_t := {fax_lit};
+                l_authinfo       epp_authinfo_t := {authinfo_lit};
+                l_crid           VARCHAR2(16);
+                l_crdate         DATE;
+                l_code           NUMBER;
+                l_msg            VARCHAR2(4000);
+                l_svtrid         VARCHAR2(64);
+            BEGIN
+                epp_contact.contact_create(
+                    connection_id  => :connection_id,
+                    session_id     => :session_id,
+                    cltrid         => :cltrid,
+                    id             => :contact_id,
+                    postalinfo_int => l_postalinfo_int,
+                    postalinfo_loc => l_postalinfo_loc,
+                    voice          => l_voice,
+                    fax            => l_fax,
+                    email          => :email,
+                    authinfo       => l_authinfo,
+                    response       => l_response,
+                    crid           => l_crid,
+                    crdate         => l_crdate
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+                :cr_id := l_crid;
+                :cr_date := TO_CHAR(l_crdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "contact_id": contact_id,
+                "email": email or "",
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "cr_id": cursor.var(str, 16),
+                "cr_date": cursor.var(str, 30)
+            }
+
+            try:
+                cursor.execute(sql, binds)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"epp_contact.contact_create() failed: {e}")
+                raise
+
+            result = {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "cr_id": self._extract_var(binds["cr_id"], contact_id),
+                "cr_date": self._extract_var(binds["cr_date"], None),
+            }
+            cursor.close()
+
+            logger.info(
+                f"epp_contact.contact_create({contact_id}) returned code={result['response_code']}"
+            )
+            return result
+
+    async def contact_info(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        contact_id: str,
+        auth_info: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Call epp_contact.contact_info() to get contact information."""
+        authinfo_lit = self._build_authinfo_literal(auth_info)
+        max_statuses = 10
+
+        status_vars = []
+        for i in range(max_statuses):
+            status_vars.append(f"""
+                IF l_infdata.status IS NOT NULL AND l_infdata.status.COUNT >= {i + 1} THEN
+                    :st_s_{i} := l_infdata.status({i + 1}).value;
+                    :st_lang_{i} := l_infdata.status({i + 1}).language;
+                    :st_text_{i} := l_infdata.status({i + 1}).text;
+                END IF;
+            """)
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_infdata  epp_con_infdata_t;
+                l_authinfo epp_authinfo_t := {authinfo_lit};
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_contact.contact_info(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    id            => :contact_id,
+                    authinfo      => l_authinfo,
+                    response      => l_response,
+                    infdata       => l_infdata
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+
+                IF l_infdata IS NOT NULL THEN
+                    :inf_id := l_infdata.id;
+                    :inf_roid := l_infdata.roid;
+                    :inf_email := l_infdata.email;
+                    :inf_clid := l_infdata.clid;
+                    :inf_crid := l_infdata.crid;
+                    :inf_crdate := TO_CHAR(l_infdata.crdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :inf_upid := l_infdata.upid;
+                    :inf_update := TO_CHAR(l_infdata.up_date, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :inf_trdate := TO_CHAR(l_infdata.trdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+
+                    IF l_infdata.voice IS NOT NULL THEN
+                        :inf_voice := l_infdata.voice.string;
+                        :inf_voice_ext := l_infdata.voice.x;
+                    END IF;
+
+                    IF l_infdata.fax IS NOT NULL THEN
+                        :inf_fax := l_infdata.fax.string;
+                        :inf_fax_ext := l_infdata.fax.x;
+                    END IF;
+
+                    IF l_infdata.authinfo IS NOT NULL THEN
+                        :inf_authinfo := l_infdata.authinfo.pw;
+                    END IF;
+
+                    :status_count := CASE WHEN l_infdata.status IS NOT NULL THEN l_infdata.status.COUNT ELSE 0 END;
+                    {"".join(status_vars)}
+
+                    -- PostalInfo INT
+                    :inf_has_pi_int := 0;
+                    IF l_infdata.postalinfo_int IS NOT NULL AND l_infdata.postalinfo_int.name IS NOT NULL THEN
+                        :inf_has_pi_int := 1;
+                        :inf_pi_int_name := l_infdata.postalinfo_int.name;
+                        :inf_pi_int_org := l_infdata.postalinfo_int.org;
+                        :inf_pi_int_s1 := l_infdata.postalinfo_int.street1;
+                        :inf_pi_int_s2 := l_infdata.postalinfo_int.street2;
+                        :inf_pi_int_s3 := l_infdata.postalinfo_int.street3;
+                        :inf_pi_int_city := l_infdata.postalinfo_int.city;
+                        :inf_pi_int_sp := l_infdata.postalinfo_int.state;
+                        :inf_pi_int_pc := l_infdata.postalinfo_int.postcode;
+                        :inf_pi_int_cc := l_infdata.postalinfo_int.country;
+                    END IF;
+
+                    -- PostalInfo LOC
+                    :inf_has_pi_loc := 0;
+                    IF l_infdata.postalinfo_loc IS NOT NULL AND l_infdata.postalinfo_loc.name IS NOT NULL THEN
+                        :inf_has_pi_loc := 1;
+                        :inf_pi_loc_name := l_infdata.postalinfo_loc.name;
+                        :inf_pi_loc_org := l_infdata.postalinfo_loc.org;
+                        :inf_pi_loc_s1 := l_infdata.postalinfo_loc.street1;
+                        :inf_pi_loc_s2 := l_infdata.postalinfo_loc.street2;
+                        :inf_pi_loc_s3 := l_infdata.postalinfo_loc.street3;
+                        :inf_pi_loc_city := l_infdata.postalinfo_loc.city;
+                        :inf_pi_loc_sp := l_infdata.postalinfo_loc.state;
+                        :inf_pi_loc_pc := l_infdata.postalinfo_loc.postcode;
+                        :inf_pi_loc_cc := l_infdata.postalinfo_loc.country;
+                    END IF;
+                END IF;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "contact_id": contact_id,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "inf_id": cursor.var(str, 16),
+                "inf_roid": cursor.var(str, 89),
+                "inf_email": cursor.var(str, 255),
+                "inf_clid": cursor.var(str, 16),
+                "inf_crid": cursor.var(str, 16),
+                "inf_crdate": cursor.var(str, 30),
+                "inf_upid": cursor.var(str, 16),
+                "inf_update": cursor.var(str, 30),
+                "inf_trdate": cursor.var(str, 30),
+                "inf_voice": cursor.var(str, 17),
+                "inf_voice_ext": cursor.var(str, 17),
+                "inf_fax": cursor.var(str, 17),
+                "inf_fax_ext": cursor.var(str, 17),
+                "inf_authinfo": cursor.var(str, 255),
+                "status_count": cursor.var(int),
+                "inf_has_pi_int": cursor.var(int),
+                "inf_pi_int_name": cursor.var(str, 255),
+                "inf_pi_int_org": cursor.var(str, 255),
+                "inf_pi_int_s1": cursor.var(str, 255),
+                "inf_pi_int_s2": cursor.var(str, 255),
+                "inf_pi_int_s3": cursor.var(str, 255),
+                "inf_pi_int_city": cursor.var(str, 255),
+                "inf_pi_int_sp": cursor.var(str, 255),
+                "inf_pi_int_pc": cursor.var(str, 16),
+                "inf_pi_int_cc": cursor.var(str, 2),
+                "inf_has_pi_loc": cursor.var(int),
+                "inf_pi_loc_name": cursor.var(str, 255),
+                "inf_pi_loc_org": cursor.var(str, 255),
+                "inf_pi_loc_s1": cursor.var(str, 255),
+                "inf_pi_loc_s2": cursor.var(str, 255),
+                "inf_pi_loc_s3": cursor.var(str, 255),
+                "inf_pi_loc_city": cursor.var(str, 255),
+                "inf_pi_loc_sp": cursor.var(str, 255),
+                "inf_pi_loc_pc": cursor.var(str, 16),
+                "inf_pi_loc_cc": cursor.var(str, 2),
+            }
+            for i in range(max_statuses):
+                binds[f"st_s_{i}"] = cursor.var(str, 24)
+                binds[f"st_lang_{i}"] = cursor.var(str, 20)
+                binds[f"st_text_{i}"] = cursor.var(str, 100)
+
+            cursor.execute(sql, binds)
+            conn.commit()
+
+            response_code = self._extract_var(binds["response_code"], 2400)
+
+            statuses = []
+            status_count = self._extract_var(binds["status_count"], 0)
+            for i in range(min(status_count, max_statuses)):
+                s = self._extract_var(binds[f"st_s_{i}"], None)
+                if s:
+                    statuses.append({
+                        "s": s,
+                        "lang": self._extract_var(binds[f"st_lang_{i}"], None),
+                        "reason": self._extract_var(binds[f"st_text_{i}"], None)
+                    })
+
+            # Build postal info dicts
+            def _build_postal(prefix):
+                street = []
+                for sk in ["s1", "s2", "s3"]:
+                    sv = self._extract_var(binds[f"inf_pi_{prefix}_{sk}"], None)
+                    if sv:
+                        street.append(sv)
+                return {
+                    "name": self._extract_var(binds[f"inf_pi_{prefix}_name"], None),
+                    "org": self._extract_var(binds[f"inf_pi_{prefix}_org"], None),
+                    "street": street,
+                    "city": self._extract_var(binds[f"inf_pi_{prefix}_city"], None),
+                    "sp": self._extract_var(binds[f"inf_pi_{prefix}_sp"], None),
+                    "pc": self._extract_var(binds[f"inf_pi_{prefix}_pc"], None),
+                    "cc": self._extract_var(binds[f"inf_pi_{prefix}_cc"], None),
+                }
+
+            pi_int = _build_postal("int") if self._extract_var(binds["inf_has_pi_int"], 0) == 1 else None
+            pi_loc = _build_postal("loc") if self._extract_var(binds["inf_has_pi_loc"], 0) == 1 else None
+
+            cursor.close()
+
+            return {
+                "response_code": response_code,
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "id": self._extract_var(binds["inf_id"], ""),
+                "roid": self._extract_var(binds["inf_roid"], ""),
+                "email": self._extract_var(binds["inf_email"], ""),
+                "clID": self._extract_var(binds["inf_clid"], ""),
+                "crID": self._extract_var(binds["inf_crid"], ""),
+                "crDate": self._extract_var(binds["inf_crdate"], None),
+                "upID": self._extract_var(binds["inf_upid"], None),
+                "upDate": self._extract_var(binds["inf_update"], None),
+                "trDate": self._extract_var(binds["inf_trdate"], None),
+                "voice": self._extract_var(binds["inf_voice"], None),
+                "voice_ext": self._extract_var(binds["inf_voice_ext"], None),
+                "fax": self._extract_var(binds["inf_fax"], None),
+                "fax_ext": self._extract_var(binds["inf_fax_ext"], None),
+                "authInfo": self._extract_var(binds["inf_authinfo"], None),
+                "statuses": statuses,
+                "postalInfo_int": pi_int,
+                "postalInfo_loc": pi_loc,
+            }
+
+    async def contact_update(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        contact_id: str,
+        add_statuses: Optional[List] = None,
+        rem_statuses: Optional[List] = None,
+        chg_postalinfo_int: Optional[Dict[str, Any]] = None,
+        chg_postalinfo_loc: Optional[Dict[str, Any]] = None,
+        chg_voice: Optional[str] = None,
+        chg_voice_ext: Optional[str] = None,
+        chg_fax: Optional[str] = None,
+        chg_fax_ext: Optional[str] = None,
+        chg_email: Optional[str] = None,
+        chg_authinfo: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Call epp_contact.contact_update() to update a contact."""
+        add_status_lit = self._build_status_list_literal(add_statuses) if add_statuses else "epp_status_list_t()"
+        rem_status_lit = self._build_status_list_literal(rem_statuses) if rem_statuses else "epp_status_list_t()"
+
+        chg_pi_int_lit = self._build_chg_postalinfo_literal(chg_postalinfo_int) if chg_postalinfo_int else "NULL"
+        chg_pi_loc_lit = self._build_chg_postalinfo_literal(chg_postalinfo_loc) if chg_postalinfo_loc else "NULL"
+        chg_voice_lit = self._build_e164_literal(chg_voice, chg_voice_ext) if chg_voice else "NULL"
+        chg_fax_lit = self._build_e164_literal(chg_fax, chg_fax_ext) if chg_fax else "NULL"
+        chg_email_lit = f"eppcom_min_token_t('{self._escape_sql(chg_email)}')" if chg_email else "NULL"
+        chg_authinfo_lit = self._build_authinfo_literal(chg_authinfo) if chg_authinfo else "NULL"
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_add      epp_con_add_rem_t := epp_con_add_rem_t({add_status_lit});
+                l_rem      epp_con_add_rem_t := epp_con_add_rem_t({rem_status_lit});
+                l_chg      epp_con_chg_t := epp_con_chg_t(
+                               {chg_pi_int_lit},
+                               {chg_pi_loc_lit},
+                               {chg_voice_lit},
+                               {chg_fax_lit},
+                               {chg_email_lit},
+                               {chg_authinfo_lit},
+                               NULL
+                           );
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_contact.contact_update(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    id            => :contact_id,
+                    add_fields    => l_add,
+                    rem_fields    => l_rem,
+                    chg_fields    => l_chg,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "contact_id": contact_id,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    async def contact_delete(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        contact_id: str
+    ) -> Dict[str, Any]:
+        """Call epp_contact.contact_delete() to delete a contact."""
+        sql = """
+            DECLARE
+                l_response epp_response_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_contact.contact_delete(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    id            => :contact_id,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "contact_id": contact_id,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    async def contact_transfer(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        op: str,
+        contact_id: str,
+        auth_info: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Call epp_contact.contact_transfer() for transfer operations."""
+        authinfo_lit = self._build_authinfo_literal(auth_info)
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_trndata  epp_con_trndata_t;
+                l_authinfo epp_authinfo_t := {authinfo_lit};
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_contact.contact_transfer(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    op            => :op,
+                    id            => :contact_id,
+                    authinfo      => l_authinfo,
+                    response      => l_response,
+                    trndata       => l_trndata
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+
+                IF l_trndata IS NOT NULL THEN
+                    :trn_id := l_trndata.id;
+                    :trn_status := l_trndata.status;
+                    :trn_reid := l_trndata.reid;
+                    :trn_redate := TO_CHAR(l_trndata.redate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :trn_acid := l_trndata.acid;
+                    :trn_acdate := TO_CHAR(l_trndata.acdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                END IF;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "op": op,
+                "contact_id": contact_id,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "trn_id": cursor.var(str, 16),
+                "trn_status": cursor.var(str, 20),
+                "trn_reid": cursor.var(str, 16),
+                "trn_redate": cursor.var(str, 30),
+                "trn_acid": cursor.var(str, 16),
+                "trn_acdate": cursor.var(str, 30)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "id": self._extract_var(binds["trn_id"], contact_id),
+                "trStatus": self._extract_var(binds["trn_status"], ""),
+                "reID": self._extract_var(binds["trn_reid"], ""),
+                "reDate": self._extract_var(binds["trn_redate"], None),
+                "acID": self._extract_var(binds["trn_acid"], ""),
+                "acDate": self._extract_var(binds["trn_acdate"], None)
+            }
+
 
 # Global instance
 _plsql_caller: Optional[EPPProcedureCaller] = None

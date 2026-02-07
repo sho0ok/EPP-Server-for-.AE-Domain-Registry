@@ -1,12 +1,13 @@
 """
 Contact Commands
 
-Handles EPP contact commands:
+Handles EPP contact commands via ARI PL/SQL stored procedures:
 - check: Check contact availability
 - info: Get contact information
 - create: Create new contact
 - update: Update contact
 - delete: Delete contact
+- transfer: Transfer contact
 """
 
 import logging
@@ -15,28 +16,30 @@ from typing import Any, Dict, List, Optional
 from src.commands.base import (
     ObjectCommandHandler,
     CommandError,
-    ObjectNotFoundError,
-    AuthorizationError,
 )
 from src.core.session_manager import SessionInfo
 from src.core.xml_processor import EPPCommand
-from src.database.repositories.contact_repo import get_contact_repo
-from src.utils.roid_generator import generate_roid
+from src.database.plsql_caller import get_plsql_caller
 from src.utils.password_utils import generate_auth_info, validate_auth_info
 from src.validators.epp_validator import get_validator
 
 logger = logging.getLogger("epp.commands.contact")
 
 
-class ContactCheckHandler(ObjectCommandHandler):
-    """
-    Handle contact:check command.
+def _plsql_response_to_epp_error(response_code: int, response_message: str) -> CommandError:
+    """Convert a PL/SQL stored procedure response to a CommandError."""
+    return CommandError(
+        code=response_code,
+        message=response_message or "Command failed"
+    )
 
-    Checks availability of one or more contact IDs.
-    """
+
+class ContactCheckHandler(ObjectCommandHandler):
+    """Handle contact:check command."""
 
     command_name = "check"
     object_type = "contact"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -47,9 +50,7 @@ class ContactCheckHandler(ObjectCommandHandler):
         cl_trid = command.client_transaction_id
         data = command.data
 
-        # Get contact IDs to check
         ids = data.get("ids", [])
-
         if not ids:
             raise CommandError(
                 2003,
@@ -57,11 +58,21 @@ class ContactCheckHandler(ObjectCommandHandler):
                 reason="At least one contact ID required"
             )
 
-        # Check each contact
-        contact_repo = await get_contact_repo()
-        results = await contact_repo.check_multiple(ids)
+        plsql = await get_plsql_caller()
+        result = await plsql.contact_check(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            contact_ids=ids
+        )
 
-        # Build response
+        response_code = result.get("response_code", 2400)
+        if response_code >= 2000:
+            raise _plsql_response_to_epp_error(
+                response_code, result.get("response_message", "")
+            )
+
+        results = result.get("results", [])
         result_data = self.response_builder.build_contact_check_result(results)
 
         return self.success_response(
@@ -71,14 +82,11 @@ class ContactCheckHandler(ObjectCommandHandler):
 
 
 class ContactInfoHandler(ObjectCommandHandler):
-    """
-    Handle contact:info command.
-
-    Returns detailed information about a contact.
-    """
+    """Handle contact:info command."""
 
     command_name = "info"
     object_type = "contact"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -99,59 +107,35 @@ class ContactInfoHandler(ObjectCommandHandler):
 
         auth_info = data.get("authInfo")
 
-        # Get contact data
-        contact_repo = await get_contact_repo()
-        contact = await contact_repo.get_by_uid(contact_id)
+        plsql = await get_plsql_caller()
+        result = await plsql.contact_info(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            contact_id=contact_id,
+            auth_info=auth_info
+        )
 
-        if not contact:
-            raise ObjectNotFoundError("contact", contact_id)
+        response_code = result.get("response_code", 2400)
+        if response_code >= 2000:
+            raise _plsql_response_to_epp_error(
+                response_code, result.get("response_message", "")
+            )
 
-        # Check authorization for auth info
-        include_auth = False
-        sponsoring_account = contact.get("_account_id")
-
-        if session.account_id == sponsoring_account:
-            # Sponsoring registrar can see auth info
-            include_auth = True
-        elif auth_info:
-            # Non-sponsor provided auth info - verify it
-            if await contact_repo.verify_auth_info(contact_id, auth_info):
-                include_auth = True
-
-        # Reload with auth info if authorized
-        if include_auth:
-            contact = await contact_repo.get_by_uid(contact_id, include_auth=True)
-
-        # Build response
-        result_data = self.response_builder.build_contact_info_result(contact)
+        result_data = self.response_builder.build_contact_info_result(result)
 
         return self.success_response(
             cl_trid=cl_trid,
             result_data=result_data
         )
 
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        contact_id = command.data.get("id")
-        if contact_id:
-            contact_repo = await get_contact_repo()
-            return await contact_repo.get_roid(contact_id)
-        return None
-
 
 class ContactCreateHandler(ObjectCommandHandler):
-    """
-    Handle contact:create command.
-
-    Creates a new contact.
-    """
+    """Handle contact:create command."""
 
     command_name = "create"
     object_type = "contact"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -162,7 +146,6 @@ class ContactCreateHandler(ObjectCommandHandler):
         cl_trid = command.client_transaction_id
         data = command.data
 
-        # Validate required fields
         contact_id = data.get("id")
         if not contact_id:
             raise CommandError(
@@ -171,13 +154,12 @@ class ContactCreateHandler(ObjectCommandHandler):
                 reason="Contact ID required"
             )
 
-        # Validate contact ID format
+        # Client-side format validation
         validator = get_validator()
         valid, error = validator.validate_contact_id(contact_id)
         if not valid:
             raise CommandError(2005, "Parameter value syntax error", reason=error)
 
-        # Validate email
         email = data.get("email")
         if not email:
             raise CommandError(
@@ -189,7 +171,6 @@ class ContactCreateHandler(ObjectCommandHandler):
         if not valid:
             raise CommandError(2005, "Parameter value syntax error", reason=error)
 
-        # Validate postal info - at least one required
         postal_int = data.get("postalInfo_int")
         postal_loc = data.get("postalInfo_loc")
         if not postal_int and not postal_loc:
@@ -199,39 +180,17 @@ class ContactCreateHandler(ObjectCommandHandler):
                 reason="At least one postalInfo required"
             )
 
-        # Validate voice phone if provided
         voice = data.get("voice")
         if voice:
             valid, error = validator.validate_phone(voice, data.get("voice_ext"))
             if not valid:
                 raise CommandError(2005, "Parameter value syntax error", reason=f"Voice: {error}")
 
-        # Validate fax if provided
         fax = data.get("fax")
         if fax:
             valid, error = validator.validate_phone(fax, data.get("fax_ext"))
             if not valid:
                 raise CommandError(2005, "Parameter value syntax error", reason=f"Fax: {error}")
-
-        # Validate country codes in postal info
-        for ptype, postal in [("int", postal_int), ("loc", postal_loc)]:
-            if postal and postal.get("cc"):
-                valid, error = validator.validate_country_code(postal["cc"])
-                if not valid:
-                    raise CommandError(2005, "Parameter value syntax error", reason=f"PostalInfo {ptype}: {error}")
-
-        # Check availability
-        contact_repo = await get_contact_repo()
-        avail, reason = await contact_repo.check_available(contact_id)
-        if not avail:
-            raise CommandError(
-                2302,
-                "Object exists",
-                reason=f"Contact {contact_id} already exists"
-            )
-
-        # Generate ROID
-        roid = await generate_roid()
 
         # Handle auth info
         auth_info = data.get("authInfo")
@@ -242,56 +201,34 @@ class ContactCreateHandler(ObjectCommandHandler):
         else:
             auth_info = generate_auth_info()
 
-        # Extract postal info - prefer international, fallback to localized
-        postal = postal_int or postal_loc or {}
-
-        # Handle street - can be string or list (street is directly in postal, not nested in addr)
-        street = postal.get("street", [])
-        if isinstance(street, str):
-            street = [street]
-        street1 = street[0] if len(street) > 0 else None
-        street2 = street[1] if len(street) > 1 else None
-        street3 = street[2] if len(street) > 2 else None
-
-        # Create contact
-        # Note: city, sp, pc, cc are directly in postal dict, not nested under addr
-        try:
-            contact = await contact_repo.create(
-                contact_id=contact_id,
-                roid=roid,
-                account_id=session.account_id,
-                user_id=session.user_id,
-                email=email,
-                auth_info=auth_info,
-                name=postal.get("name"),
-                org=postal.get("org"),
-                street1=street1,
-                street2=street2,
-                street3=street3,
-                city=postal.get("city"),
-                state=postal.get("sp"),
-                postcode=postal.get("pc"),
-                country=postal.get("cc"),
-                phone=voice,
-                phone_ext=data.get("voice_ext"),
-                fax=fax,
-                fax_ext=data.get("fax_ext")
-            )
-        except Exception as e:
-            logger.error(f"Failed to create contact {contact_id}: {e}")
-            raise CommandError(
-                2400,
-                "Command failed",
-                reason=str(e)
-            )
-
-        # Build response
-        result_data = self.response_builder.build_contact_create_result(
+        plsql = await get_plsql_caller()
+        result = await plsql.contact_create(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
             contact_id=contact_id,
-            cr_date=contact.get("crDate")
+            postalinfo_int=postal_int,
+            postalinfo_loc=postal_loc,
+            voice=voice,
+            voice_ext=data.get("voice_ext"),
+            fax=fax,
+            fax_ext=data.get("fax_ext"),
+            email=email,
+            auth_info=auth_info
         )
 
-        logger.info(f"Created contact: {contact_id} (ROID: {roid})")
+        response_code = result.get("response_code", 2400)
+        if response_code >= 2000:
+            raise _plsql_response_to_epp_error(
+                response_code, result.get("response_message", "")
+            )
+
+        result_data = self.response_builder.build_contact_create_result(
+            contact_id=result.get("cr_id", contact_id),
+            cr_date=result.get("cr_date")
+        )
+
+        logger.info(f"Created contact via PL/SQL: {contact_id}")
 
         return self.success_response(
             cl_trid=cl_trid,
@@ -300,14 +237,11 @@ class ContactCreateHandler(ObjectCommandHandler):
 
 
 class ContactUpdateHandler(ObjectCommandHandler):
-    """
-    Handle contact:update command.
-
-    Updates contact information.
-    """
+    """Handle contact:update command."""
 
     command_name = "update"
     object_type = "contact"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -326,28 +260,15 @@ class ContactUpdateHandler(ObjectCommandHandler):
                 reason="Contact ID required"
             )
 
-        # Get contact and verify authorization
-        contact_repo = await get_contact_repo()
-        contact = await contact_repo.get_by_uid(contact_id)
-
-        if not contact:
-            raise ObjectNotFoundError("contact", contact_id)
-
-        # Verify sponsoring registrar
-        if contact.get("_account_id") != session.account_id:
-            raise AuthorizationError("Only sponsoring registrar can update contact")
-
-        # Validate update data
+        # Client-side format validation
         validator = get_validator()
-
-        # Validate email if being changed
         chg_data = data.get("chg", {})
+
         if chg_data.get("email"):
             valid, error = validator.validate_email(chg_data["email"])
             if not valid:
                 raise CommandError(2005, "Parameter value syntax error", reason=f"Email: {error}")
 
-        # Validate phone if being changed
         if chg_data.get("voice"):
             valid, error = validator.validate_phone(chg_data["voice"], chg_data.get("voice_ext"))
             if not valid:
@@ -358,64 +279,68 @@ class ContactUpdateHandler(ObjectCommandHandler):
             if not valid:
                 raise CommandError(2005, "Parameter value syntax error", reason=f"Fax: {error}")
 
-        # Validate auth info if being changed
         if chg_data.get("authInfo"):
             valid, error = validate_auth_info(chg_data["authInfo"])
             if not valid:
                 raise CommandError(2005, "Parameter value syntax error", reason=f"AuthInfo: {error}")
 
-        # Extract add/rem status
+        # Extract add/rem statuses
         add_data = data.get("add", {})
         rem_data = data.get("rem", {})
 
-        add_statuses = add_data.get("statuses", [])
-        rem_statuses = rem_data.get("statuses", [])
+        add_statuses_raw = add_data.get("statuses", [])
+        rem_statuses_raw = rem_data.get("statuses", [])
 
-        # Validate client can only modify client statuses
-        for status in add_statuses + rem_statuses:
-            if status.startswith("server"):
-                raise CommandError(
-                    2306,
-                    "Parameter value policy error",
-                    reason="Cannot modify server statuses"
-                )
+        # Normalize statuses to dict format
+        add_statuses = []
+        for s in add_statuses_raw:
+            if isinstance(s, dict) and s.get("s"):
+                add_statuses.append(s)
+            elif isinstance(s, str) and s:
+                add_statuses.append({"s": s, "lang": None, "reason": None})
 
-        # Perform update
-        try:
-            updated = await contact_repo.update(
-                contact_id=contact_id,
-                user_id=session.user_id,
-                email=chg_data.get("email"),
-                phone=chg_data.get("voice"),
-                phone_ext=chg_data.get("voice_ext"),
-                fax=chg_data.get("fax"),
-                fax_ext=chg_data.get("fax_ext"),
-                auth_info=chg_data.get("authInfo"),
-                add_statuses=add_statuses,
-                rem_statuses=rem_statuses
+        rem_statuses = []
+        for s in rem_statuses_raw:
+            if isinstance(s, dict) and s.get("s"):
+                rem_statuses.append(s)
+            elif isinstance(s, str) and s:
+                rem_statuses.append({"s": s, "lang": None, "reason": None})
+
+        plsql = await get_plsql_caller()
+        result = await plsql.contact_update(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            contact_id=contact_id,
+            add_statuses=add_statuses or None,
+            rem_statuses=rem_statuses or None,
+            chg_postalinfo_int=chg_data.get("postalInfo_int"),
+            chg_postalinfo_loc=chg_data.get("postalInfo_loc"),
+            chg_voice=chg_data.get("voice"),
+            chg_voice_ext=chg_data.get("voice_ext"),
+            chg_fax=chg_data.get("fax"),
+            chg_fax_ext=chg_data.get("fax_ext"),
+            chg_email=chg_data.get("email"),
+            chg_authinfo=chg_data.get("authInfo")
+        )
+
+        response_code = result.get("response_code", 2400)
+        if response_code >= 2000:
+            raise _plsql_response_to_epp_error(
+                response_code, result.get("response_message", "")
             )
-        except Exception as e:
-            logger.error(f"Failed to update contact {contact_id}: {e}")
-            raise CommandError(
-                2400,
-                "Command failed",
-                reason=str(e)
-            )
 
-        logger.info(f"Updated contact: {contact_id}")
+        logger.info(f"Updated contact via PL/SQL: {contact_id}")
 
         return self.success_response(cl_trid=cl_trid)
 
 
 class ContactDeleteHandler(ObjectCommandHandler):
-    """
-    Handle contact:delete command.
-
-    Deletes a contact.
-    """
+    """Handle contact:delete command."""
 
     command_name = "delete"
     object_type = "contact"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -434,68 +359,31 @@ class ContactDeleteHandler(ObjectCommandHandler):
                 reason="Contact ID required"
             )
 
-        # Get contact and verify authorization
-        contact_repo = await get_contact_repo()
-        contact = await contact_repo.get_by_uid(contact_id)
+        plsql = await get_plsql_caller()
+        result = await plsql.contact_delete(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            contact_id=contact_id
+        )
 
-        if not contact:
-            raise ObjectNotFoundError("contact", contact_id)
-
-        # Verify sponsoring registrar
-        if contact.get("_account_id") != session.account_id:
-            raise AuthorizationError("Only sponsoring registrar can delete contact")
-
-        # Check if contact is in use
-        in_use, usage = await contact_repo.is_in_use(contact_id)
-        if in_use:
-            raise CommandError(
-                2305,
-                "Object association prohibits operation",
-                reason=usage
+        response_code = result.get("response_code", 2400)
+        if response_code >= 2000:
+            raise _plsql_response_to_epp_error(
+                response_code, result.get("response_message", "")
             )
 
-        # Perform delete
-        try:
-            await contact_repo.delete(contact_id)
-        except Exception as e:
-            logger.error(f"Failed to delete contact {contact_id}: {e}")
-            raise CommandError(
-                2400,
-                "Command failed",
-                reason=str(e)
-            )
-
-        logger.info(f"Deleted contact: {contact_id}")
+        logger.info(f"Deleted contact via PL/SQL: {contact_id}")
 
         return self.success_response(cl_trid=cl_trid)
 
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        contact_id = command.data.get("id")
-        if contact_id:
-            contact_repo = await get_contact_repo()
-            return await contact_repo.get_roid(contact_id)
-        return None
-
 
 class ContactTransferHandler(ObjectCommandHandler):
-    """
-    Handle contact:transfer command.
-
-    Handles all transfer operations per RFC 5733:
-    - request: Request transfer to new registrar
-    - approve: Approve incoming transfer (current sponsor)
-    - reject: Reject incoming transfer (current sponsor)
-    - cancel: Cancel outgoing transfer (requesting registrar)
-    - query: Query transfer status
-    """
+    """Handle contact:transfer command."""
 
     command_name = "transfer"
     object_type = "contact"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -514,7 +402,6 @@ class ContactTransferHandler(ObjectCommandHandler):
                 reason="Contact ID required"
             )
 
-        # Get operation type (request, approve, reject, cancel, query)
         op = data.get("op", "request")
         if op not in ("request", "approve", "reject", "cancel", "query"):
             raise CommandError(
@@ -523,231 +410,45 @@ class ContactTransferHandler(ObjectCommandHandler):
                 reason=f"Invalid transfer operation: {op}"
             )
 
-        contact_repo = await get_contact_repo()
-        contact = await contact_repo.get_by_uid(contact_id)
+        auth_info = data.get("authInfo")
 
-        if not contact:
-            raise ObjectNotFoundError("contact", contact_id)
+        plsql = await get_plsql_caller()
+        result = await plsql.contact_transfer(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            op=op,
+            contact_id=contact_id,
+            auth_info=auth_info
+        )
 
-        sponsoring_account = contact.get("_account_id")
+        response_code = result.get("response_code", 2400)
+        if response_code >= 2000:
+            raise _plsql_response_to_epp_error(
+                response_code, result.get("response_message", "")
+            )
 
-        if op == "query":
-            # Query transfer status - any registrar can query
-            transfer = await contact_repo.query_transfer(contact_id)
-            if not transfer:
-                raise CommandError(
-                    2301,
-                    "Object not pending transfer",
-                    reason="No pending transfer for contact"
-                )
-
+        # Build transfer result data if present
+        if result.get("trStatus"):
             result_data = self.response_builder.build_contact_transfer_result(
-                contact_id=contact_id,
-                tr_status=transfer["trStatus"],
-                re_id=transfer["reID"],
-                re_date=transfer["reDate"],
-                ac_id=transfer["acID"],
-                ac_date=transfer["acDate"]
+                contact_id=result.get("id", contact_id),
+                tr_status=result.get("trStatus"),
+                re_id=result.get("reID"),
+                re_date=result.get("reDate"),
+                ac_id=result.get("acID"),
+                ac_date=result.get("acDate")
             )
+        else:
+            result_data = None
 
-            return self.success_response(
-                cl_trid=cl_trid,
-                result_data=result_data
-            )
+        logger.info(f"Contact transfer ({op}) via PL/SQL: {contact_id}")
 
-        elif op == "request":
-            # Request transfer - must NOT be current sponsor
-            auth_info = data.get("authInfo")
-            if not auth_info:
-                raise CommandError(
-                    2003,
-                    "Required parameter missing",
-                    reason="Auth info required for transfer request"
-                )
-
-            # Cannot transfer own contact
-            if sponsoring_account == session.account_id:
-                raise CommandError(
-                    2306,
-                    "Parameter value policy error",
-                    reason="Cannot transfer contact you already sponsor"
-                )
-
-            try:
-                result = await contact_repo.request_transfer(
-                    contact_id=contact_id,
-                    requesting_account_id=session.account_id,
-                    user_id=session.user_id,
-                    auth_info=auth_info
-                )
-            except ValueError as e:
-                error_msg = str(e)
-                if "Invalid authorization" in error_msg:
-                    raise CommandError(2202, "Invalid authorization information")
-                elif "pending transfer" in error_msg:
-                    raise CommandError(2300, "Object pending transfer")
-                elif "prohibited" in error_msg:
-                    raise CommandError(
-                        2304,
-                        "Object status prohibits operation",
-                        reason=error_msg
-                    )
-                else:
-                    raise CommandError(2400, "Command failed", reason=error_msg)
-            except Exception as e:
-                logger.error(f"Failed to request transfer for {contact_id}: {e}")
-                raise CommandError(2400, "Command failed", reason=str(e))
-
-            result_data = self.response_builder.build_contact_transfer_result(
-                contact_id=contact_id,
-                tr_status="pending",
-                re_id=result["reID"],
-                re_date=result["reDate"],
-                ac_id=result["acID"],
-                ac_date=result["acDate"]
-            )
-
-            logger.info(f"Transfer requested for contact: {contact_id}")
-
-            return self.success_response(
-                cl_trid=cl_trid,
-                code=1001,
-                message="Command completed successfully; action pending",
-                result_data=result_data
-            )
-
-        elif op == "approve":
-            # Approve transfer - must be current sponsor
-            if sponsoring_account != session.account_id:
-                raise AuthorizationError(
-                    "Only current sponsoring registrar can approve transfer"
-                )
-
-            try:
-                result = await contact_repo.approve_transfer(
-                    contact_id=contact_id,
-                    user_id=session.user_id
-                )
-            except ValueError as e:
-                if "No pending transfer" in str(e):
-                    raise CommandError(
-                        2301,
-                        "Object not pending transfer",
-                        reason="No pending transfer for contact"
-                    )
-                raise CommandError(2400, "Command failed", reason=str(e))
-            except Exception as e:
-                logger.error(f"Failed to approve transfer for {contact_id}: {e}")
-                raise CommandError(2400, "Command failed", reason=str(e))
-
-            result_data = self.response_builder.build_contact_transfer_result(
-                contact_id=contact_id,
-                tr_status=result["trStatus"],
-                re_id=result["reID"],
-                re_date=result["reDate"],
-                ac_id=result["acID"],
-                ac_date=result["acDate"]
-            )
-
-            logger.info(f"Transfer approved for contact: {contact_id}")
-
-            return self.success_response(
-                cl_trid=cl_trid,
-                result_data=result_data
-            )
-
-        elif op == "reject":
-            # Reject transfer - must be current sponsor
-            if sponsoring_account != session.account_id:
-                raise AuthorizationError(
-                    "Only current sponsoring registrar can reject transfer"
-                )
-
-            try:
-                result = await contact_repo.reject_transfer(
-                    contact_id=contact_id,
-                    user_id=session.user_id
-                )
-            except ValueError as e:
-                if "No pending transfer" in str(e):
-                    raise CommandError(
-                        2301,
-                        "Object not pending transfer",
-                        reason="No pending transfer for contact"
-                    )
-                raise CommandError(2400, "Command failed", reason=str(e))
-            except Exception as e:
-                logger.error(f"Failed to reject transfer for {contact_id}: {e}")
-                raise CommandError(2400, "Command failed", reason=str(e))
-
-            result_data = self.response_builder.build_contact_transfer_result(
-                contact_id=contact_id,
-                tr_status=result["trStatus"],
-                re_id=result["reID"],
-                re_date=result["reDate"],
-                ac_id=result["acID"],
-                ac_date=result["acDate"]
-            )
-
-            logger.info(f"Transfer rejected for contact: {contact_id}")
-
-            return self.success_response(
-                cl_trid=cl_trid,
-                result_data=result_data
-            )
-
-        elif op == "cancel":
-            # Cancel transfer - must be requesting registrar
-            try:
-                result = await contact_repo.cancel_transfer(
-                    contact_id=contact_id,
-                    user_id=session.user_id,
-                    requesting_account_id=session.account_id
-                )
-            except ValueError as e:
-                error_msg = str(e)
-                if "No pending transfer" in error_msg:
-                    raise CommandError(
-                        2301,
-                        "Object not pending transfer",
-                        reason="No pending transfer for contact"
-                    )
-                elif "Only requesting registrar" in error_msg:
-                    raise AuthorizationError(
-                        "Only requesting registrar can cancel transfer"
-                    )
-                raise CommandError(2400, "Command failed", reason=error_msg)
-            except Exception as e:
-                logger.error(f"Failed to cancel transfer for {contact_id}: {e}")
-                raise CommandError(2400, "Command failed", reason=str(e))
-
-            result_data = self.response_builder.build_contact_transfer_result(
-                contact_id=contact_id,
-                tr_status=result["trStatus"],
-                re_id=result["reID"],
-                re_date=result["reDate"],
-                ac_id=result["acID"],
-                ac_date=result["acDate"]
-            )
-
-            logger.info(f"Transfer cancelled for contact: {contact_id}")
-
-            return self.success_response(
-                cl_trid=cl_trid,
-                result_data=result_data
-            )
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        contact_id = command.data.get("id")
-        if contact_id:
-            contact_repo = await get_contact_repo()
-            return await contact_repo.get_roid(contact_id)
-        return None
+        return self.success_response(
+            cl_trid=cl_trid,
+            code=response_code,
+            message=result.get("response_message"),
+            result_data=result_data
+        )
 
 
 # Handler registry
@@ -762,15 +463,7 @@ CONTACT_HANDLERS = {
 
 
 def get_contact_handler(command_type: str) -> Optional[ObjectCommandHandler]:
-    """
-    Get handler for contact command.
-
-    Args:
-        command_type: Command type (check, info, create, etc.)
-
-    Returns:
-        Handler instance or None
-    """
+    """Get handler for contact command."""
     handler_class = CONTACT_HANDLERS.get(command_type)
     if handler_class:
         return handler_class()
