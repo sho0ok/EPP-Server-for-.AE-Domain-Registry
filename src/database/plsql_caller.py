@@ -2669,6 +2669,190 @@ class EPPProcedureCaller:
             }
 
 
+    # ========================================================================
+    # Poll Operations
+    # ========================================================================
+
+    async def poll(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        op: str,
+        msgid: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Call epp.poll() for poll request/acknowledge operations.
+
+        Args:
+            op: Poll operation - 'req' or 'ack'
+            msgid: Message ID to acknowledge (required for ack)
+
+        Returns:
+            Dict with response, message queue info, and optional resdata
+        """
+        date_fmt = 'YYYY-MM-DD"T"HH24:MI:SS".0Z"'
+
+        sql = f"""
+            DECLARE
+                l_response epp_response_t;
+                l_resdata  epp_poll_resdata_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp.poll(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    op            => :op,
+                    msgid         => :msgid,
+                    cltrid        => :cltrid,
+                    response      => l_response,
+                    resdata       => l_resdata
+                );
+
+                -- Extract response code/message
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+
+                -- Extract message queue info
+                IF l_response.msgq IS NOT NULL THEN
+                    :msgq_count := l_response.msgq.count;
+                    :msgq_id := l_response.msgq.id;
+                    :msgq_qdate := TO_CHAR(l_response.msgq.qdate, '{date_fmt}');
+                    IF l_response.msgq.msg IS NOT NULL THEN
+                        :msgq_msg := l_response.msgq.msg.string;
+                        :msgq_lang := l_response.msgq.msg.lang;
+                    END IF;
+                END IF;
+
+                -- Extract resdata (check each nested type for NOT NULL)
+                IF l_resdata IS NOT NULL THEN
+                    IF l_resdata.domain_trndata IS NOT NULL THEN
+                        :resdata_type := 'domain_trndata';
+                        :dom_trn_name := l_resdata.domain_trndata.name;
+                        :dom_trn_status := l_resdata.domain_trndata.status;
+                        :dom_trn_reid := l_resdata.domain_trndata.reid;
+                        :dom_trn_redate := TO_CHAR(l_resdata.domain_trndata.redate, '{date_fmt}');
+                        :dom_trn_acid := l_resdata.domain_trndata.acid;
+                        :dom_trn_acdate := TO_CHAR(l_resdata.domain_trndata.acdate, '{date_fmt}');
+                        :dom_trn_exdate := TO_CHAR(l_resdata.domain_trndata.exdate, '{date_fmt}');
+                    ELSIF l_resdata.contact_trndata IS NOT NULL THEN
+                        :resdata_type := 'contact_trndata';
+                        :con_trn_id := l_resdata.contact_trndata.id;
+                        :con_trn_status := l_resdata.contact_trndata.status;
+                        :con_trn_reid := l_resdata.contact_trndata.reid;
+                        :con_trn_redate := TO_CHAR(l_resdata.contact_trndata.redate, '{date_fmt}');
+                        :con_trn_acid := l_resdata.contact_trndata.acid;
+                        :con_trn_acdate := TO_CHAR(l_resdata.contact_trndata.acdate, '{date_fmt}');
+                    ELSIF l_resdata.domain_pandata IS NOT NULL THEN
+                        :resdata_type := 'domain_pandata';
+                        IF l_resdata.domain_pandata.name IS NOT NULL THEN
+                            :dom_pan_name := l_resdata.domain_pandata.name.name;
+                            :dom_pan_result := l_resdata.domain_pandata.name.paresult;
+                        END IF;
+                        IF l_resdata.domain_pandata.paTRID IS NOT NULL THEN
+                            :dom_pan_trid_cl := l_resdata.domain_pandata.paTRID.clTRID;
+                            :dom_pan_trid_sv := l_resdata.domain_pandata.paTRID.svTRID;
+                        END IF;
+                        :dom_pan_date := TO_CHAR(l_resdata.domain_pandata.paDate, '{date_fmt}');
+                    END IF;
+                END IF;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "op": op,
+                "msgid": msgid,
+                "cltrid": cltrid,
+                # Response
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                # Message queue
+                "msgq_count": cursor.var(int),
+                "msgq_id": cursor.var(int),
+                "msgq_qdate": cursor.var(str, 30),
+                "msgq_msg": cursor.var(str, 4000),
+                "msgq_lang": cursor.var(str, 20),
+                # Resdata type indicator
+                "resdata_type": cursor.var(str, 30),
+                # Domain transfer data
+                "dom_trn_name": cursor.var(str, 255),
+                "dom_trn_status": cursor.var(str, 20),
+                "dom_trn_reid": cursor.var(str, 16),
+                "dom_trn_redate": cursor.var(str, 30),
+                "dom_trn_acid": cursor.var(str, 16),
+                "dom_trn_acdate": cursor.var(str, 30),
+                "dom_trn_exdate": cursor.var(str, 30),
+                # Contact transfer data
+                "con_trn_id": cursor.var(str, 16),
+                "con_trn_status": cursor.var(str, 20),
+                "con_trn_reid": cursor.var(str, 16),
+                "con_trn_redate": cursor.var(str, 30),
+                "con_trn_acid": cursor.var(str, 16),
+                "con_trn_acdate": cursor.var(str, 30),
+                # Domain pandata
+                "dom_pan_name": cursor.var(str, 255),
+                "dom_pan_result": cursor.var(str, 5),
+                "dom_pan_trid_cl": cursor.var(str, 64),
+                "dom_pan_trid_sv": cursor.var(str, 64),
+                "dom_pan_date": cursor.var(str, 30),
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                # Message queue
+                "msgq_count": self._extract_var(binds["msgq_count"], 0),
+                "msgq_id": self._extract_var(binds["msgq_id"], None),
+                "msgq_qdate": self._extract_var(binds["msgq_qdate"], None),
+                "msgq_msg": self._extract_var(binds["msgq_msg"], None),
+                "msgq_lang": self._extract_var(binds["msgq_lang"], None),
+                # Resdata
+                "resdata_type": self._extract_var(binds["resdata_type"], None),
+                "dom_trn_name": self._extract_var(binds["dom_trn_name"], None),
+                "dom_trn_status": self._extract_var(binds["dom_trn_status"], None),
+                "dom_trn_reid": self._extract_var(binds["dom_trn_reid"], None),
+                "dom_trn_redate": self._extract_var(binds["dom_trn_redate"], None),
+                "dom_trn_acid": self._extract_var(binds["dom_trn_acid"], None),
+                "dom_trn_acdate": self._extract_var(binds["dom_trn_acdate"], None),
+                "dom_trn_exdate": self._extract_var(binds["dom_trn_exdate"], None),
+                "con_trn_id": self._extract_var(binds["con_trn_id"], None),
+                "con_trn_status": self._extract_var(binds["con_trn_status"], None),
+                "con_trn_reid": self._extract_var(binds["con_trn_reid"], None),
+                "con_trn_redate": self._extract_var(binds["con_trn_redate"], None),
+                "con_trn_acid": self._extract_var(binds["con_trn_acid"], None),
+                "con_trn_acdate": self._extract_var(binds["con_trn_acdate"], None),
+                "dom_pan_name": self._extract_var(binds["dom_pan_name"], None),
+                "dom_pan_result": self._extract_var(binds["dom_pan_result"], None),
+                "dom_pan_trid_cl": self._extract_var(binds["dom_pan_trid_cl"], None),
+                "dom_pan_trid_sv": self._extract_var(binds["dom_pan_trid_sv"], None),
+                "dom_pan_date": self._extract_var(binds["dom_pan_date"], None),
+            }
+
+
 # Global instance
 _plsql_caller: Optional[EPPProcedureCaller] = None
 

@@ -272,7 +272,10 @@ class ResponseBuilder:
             if "qDate" in msg_queue:
                 etree.SubElement(msgQ, "qDate").text = msg_queue["qDate"]
             if "msg" in msg_queue:
-                etree.SubElement(msgQ, "msg").text = msg_queue["msg"]
+                msg_elem = etree.SubElement(msgQ, "msg")
+                msg_elem.text = msg_queue["msg"]
+                if msg_queue.get("lang"):
+                    msg_elem.set("lang", msg_queue["lang"])
 
         # Result data
         if result_data is not None:
@@ -536,6 +539,32 @@ class ResponseBuilder:
         if ex_date:
             etree.SubElement(trn_data, "{%s}exDate" % DOMAIN_NS).text = ex_date
         return trn_data
+
+    def build_domain_pandata_result(
+        self,
+        name: str,
+        pa_result: bool,
+        pa_trid_cl: Optional[str],
+        pa_trid_sv: Optional[str],
+        pa_date: str
+    ) -> etree._Element:
+        """Build domain:panData result for pending action notification."""
+        pan_data = etree.Element(
+            "{%s}panData" % DOMAIN_NS,
+            nsmap={"domain": DOMAIN_NS}
+        )
+        name_elem = etree.SubElement(pan_data, "{%s}name" % DOMAIN_NS)
+        name_elem.text = name
+        name_elem.set("paResult", "1" if pa_result else "0")
+
+        pa_trid = etree.SubElement(pan_data, "{%s}paTRID" % DOMAIN_NS)
+        if pa_trid_cl:
+            etree.SubElement(pa_trid, "clTRID").text = pa_trid_cl
+        if pa_trid_sv:
+            etree.SubElement(pa_trid, "svTRID").text = pa_trid_sv
+
+        etree.SubElement(pan_data, "{%s}paDate" % DOMAIN_NS).text = pa_date
+        return pan_data
 
     # Contact response builders
 

@@ -9,13 +9,11 @@ Handles EPP session commands:
 """
 
 import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
-from src.commands.base import BaseCommandHandler, CommandError
+from src.commands.base import BaseCommandHandler
 from src.core.session_manager import SessionInfo, get_session_manager
 from src.core.xml_processor import EPPCommand
-from src.utils.response_builder import get_response_builder
 
 logger = logging.getLogger("epp.commands.session")
 
@@ -208,7 +206,7 @@ class LogoutHandler(BaseCommandHandler):
 
 class PollHandler(BaseCommandHandler):
     """
-    Handle EPP poll command.
+    Handle EPP poll command via ARI's epp.poll() stored procedure.
 
     Manages message queue:
     - poll op="req": Request next message
@@ -217,24 +215,21 @@ class PollHandler(BaseCommandHandler):
 
     command_name = "poll"
     requires_auth = True
+    plsql_managed = True
 
     async def handle(
         self,
         command: EPPCommand,
         session: SessionInfo
     ) -> bytes:
-        """Process poll command."""
+        """Process poll command via PL/SQL."""
         cl_trid = command.client_transaction_id
         data = command.data
 
         op = data.get("op", "req")
+        msgid = data.get("msgID")
 
-        if op == "req":
-            return await self._handle_poll_req(session, cl_trid)
-        elif op == "ack":
-            msg_id = data.get("msgID")
-            return await self._handle_poll_ack(session, cl_trid, msg_id)
-        else:
+        if op not in ("req", "ack"):
             return self.error_response(
                 code=2005,
                 message="Parameter value syntax error",
@@ -243,55 +238,7 @@ class PollHandler(BaseCommandHandler):
                 value=op
             )
 
-    async def _handle_poll_req(
-        self,
-        session: SessionInfo,
-        cl_trid: Optional[str]
-    ) -> bytes:
-        """
-        Handle poll request - get next message.
-
-        TODO: Implement actual message queue from database.
-        For now, returns no messages.
-        """
-        # Query for pending messages
-        messages = await self._get_pending_messages(session)
-
-        if not messages:
-            return self.response_builder.build_response(
-                code=1300,
-                message="Command completed successfully; no messages",
-                cl_trid=cl_trid
-            )
-
-        # Return first message
-        msg = messages[0]
-        msg_queue = {
-            "count": len(messages),
-            "id": str(msg["id"]),
-            "qDate": msg["date"],
-            "msg": msg["message"]
-        }
-
-        return self.response_builder.build_response(
-            code=1301,
-            message="Command completed successfully; ack to dequeue",
-            cl_trid=cl_trid,
-            msg_queue=msg_queue
-        )
-
-    async def _handle_poll_ack(
-        self,
-        session: SessionInfo,
-        cl_trid: Optional[str],
-        msg_id: Optional[str]
-    ) -> bytes:
-        """
-        Handle poll acknowledgment - remove message from queue.
-
-        TODO: Implement actual message acknowledgment.
-        """
-        if not msg_id:
+        if op == "ack" and not msgid:
             return self.error_response(
                 code=2003,
                 message="Required parameter missing",
@@ -299,67 +246,80 @@ class PollHandler(BaseCommandHandler):
                 reason="msgID is required for poll ack"
             )
 
-        # Acknowledge message
-        success = await self._acknowledge_message(session, msg_id)
-
-        if not success:
-            return self.error_response(
-                code=2303,
-                message="Object does not exist",
-                cl_trid=cl_trid,
-                reason=f"Message {msg_id} not found"
-            )
-
-        # Get remaining count
-        remaining = await self._get_message_count(session)
-
-        msg_queue = {
-            "count": remaining,
-            "id": msg_id
-        }
-
-        return self.response_builder.build_response(
-            code=1000,
-            message="Command completed successfully",
-            cl_trid=cl_trid,
-            msg_queue=msg_queue
+        from src.database.plsql_caller import get_plsql_caller
+        plsql = await get_plsql_caller()
+        result = await plsql.poll(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            op=op,
+            msgid=msgid
         )
 
-    async def _get_pending_messages(
-        self,
-        session: SessionInfo
-    ) -> List[Dict[str, Any]]:
-        """
-        Get pending messages for account.
+        response_code = result.get("response_code", 2400)
 
-        TODO: Implement actual message retrieval from database.
-        """
-        # Placeholder - no message queue implemented yet
-        return []
+        if response_code >= 2000:
+            return self.response_builder.build_error(
+                code=response_code,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
+            )
 
-    async def _acknowledge_message(
-        self,
-        session: SessionInfo,
-        msg_id: str
-    ) -> bool:
-        """
-        Acknowledge and remove message from queue.
+        # Build message queue info if present
+        msg_queue = None
+        if result.get("msgq_id") is not None:
+            msg_queue = {
+                "count": result.get("msgq_count", 0),
+                "id": str(result["msgq_id"]),
+            }
+            if result.get("msgq_qdate"):
+                msg_queue["qDate"] = result["msgq_qdate"]
+            if result.get("msgq_msg"):
+                msg_queue["msg"] = result["msgq_msg"]
+            if result.get("msgq_lang"):
+                msg_queue["lang"] = result["msgq_lang"]
 
-        TODO: Implement actual message acknowledgment.
-        """
-        # Placeholder
-        return True
+        # Build resdata if present
+        result_data = None
+        resdata_type = result.get("resdata_type")
 
-    async def _get_message_count(
-        self,
-        session: SessionInfo
-    ) -> int:
-        """
-        Get count of remaining messages.
+        if resdata_type == "domain_trndata" and result.get("dom_trn_status"):
+            result_data = self.response_builder.build_domain_transfer_result(
+                name=result["dom_trn_name"],
+                tr_status=result["dom_trn_status"],
+                re_id=result.get("dom_trn_reid", ""),
+                re_date=result.get("dom_trn_redate", ""),
+                ac_id=result.get("dom_trn_acid", ""),
+                ac_date=result.get("dom_trn_acdate", ""),
+                ex_date=result.get("dom_trn_exdate")
+            )
+        elif resdata_type == "contact_trndata" and result.get("con_trn_status"):
+            result_data = self.response_builder.build_contact_transfer_result(
+                contact_id=result["con_trn_id"],
+                tr_status=result["con_trn_status"],
+                re_id=result.get("con_trn_reid", ""),
+                re_date=result.get("con_trn_redate", ""),
+                ac_id=result.get("con_trn_acid", ""),
+                ac_date=result.get("con_trn_acdate", "")
+            )
+        elif resdata_type == "domain_pandata" and result.get("dom_pan_name"):
+            result_data = self.response_builder.build_domain_pandata_result(
+                name=result["dom_pan_name"],
+                pa_result=result.get("dom_pan_result") == "1",
+                pa_trid_cl=result.get("dom_pan_trid_cl"),
+                pa_trid_sv=result.get("dom_pan_trid_sv"),
+                pa_date=result.get("dom_pan_date", "")
+            )
 
-        TODO: Implement actual count query.
-        """
-        return 0
+        return self.response_builder.build_response(
+            code=response_code,
+            message=result.get("response_message"),
+            cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid"),
+            result_data=result_data,
+            msg_queue=msg_queue
+        )
 
 
 # Handler registry
