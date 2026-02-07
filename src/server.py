@@ -14,7 +14,6 @@ import logging
 import logging.config
 import os
 import signal
-import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,8 +23,7 @@ from src.core.tls_handler import TLSHandler, ClientCertInfo
 from src.core.frame_handler import FrameHandler, FrameReadError, FrameSizeError
 from src.core.xml_processor import XMLProcessor, XMLParseError, XMLValidationError, EPPCommand
 from src.core.session_manager import SessionInfo, initialize_session_manager
-from src.database.connection import initialize_pool, close_pool, get_pool
-from src.database.repositories import get_account_repo
+from src.database.connection import initialize_pool, close_pool
 from src.commands.domain import get_domain_handler
 from src.commands.contact import get_contact_handler
 from src.commands.host import get_host_handler

@@ -32,7 +32,13 @@ from src.database.plsql_caller import get_plsql_caller
 from src.database.repositories.domain_repo import get_domain_repo
 from src.database.repositories.extension_repo import get_extension_repo
 from src.utils.password_utils import generate_auth_info, validate_auth_info
-from src.validators.epp_validator import get_validator
+from src.commands.extensions.ar_extension import (
+    ArUndeleteHandler,
+    ArUnrenewHandler,
+    ArPolicyDeleteHandler,
+)
+from src.commands.extensions.ae_extension import AeDomainTransferRegistrantHandler
+from src.commands.extensions.au_extension import AuDomainTransferRegistrantHandler
 
 logger = logging.getLogger("epp.commands.domain")
 
@@ -855,6 +861,14 @@ DOMAIN_HANDLERS = {
     "delete": DomainDeleteHandler,
     "renew": DomainRenewHandler,
     "transfer": DomainTransferHandler,
+    # AR extension protocol commands
+    "ar_undelete": ArUndeleteHandler,
+    "ar_unrenew": ArUnrenewHandler,
+    "ar_policy_delete": ArPolicyDeleteHandler,
+    # AE extension protocol commands
+    "ae_transfer_registrant": AeDomainTransferRegistrantHandler,
+    # AU extension protocol commands
+    "au_transfer_registrant": AuDomainTransferRegistrantHandler,
 }
 
 

@@ -12,7 +12,6 @@ Manages EPP sessions including:
 
 import logging
 import socket
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
