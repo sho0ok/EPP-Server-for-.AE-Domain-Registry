@@ -1534,36 +1534,55 @@ class XMLProcessor:
         """
         data = {"namespace": ns, "fields": {}}
 
-        # Standard AE eligibility fields
-        eligibility_fields = [
+        # Simple fields: XML element name maps directly to DB field_key
+        simple_fields = [
             "eligibilityType",
             "eligibilityName",
-            "eligibilityID",
-            "eligibilityIDType",
             "policyReason",
-            "registrantID",
-            "registrantIDType",
             "registrantName"
         ]
 
-        for field in eligibility_fields:
-            # Try with namespace prefix
-            field_elem = elem.find(f"{{{ns}}}{field}") if ns else None
-            # Try without namespace
-            if field_elem is None:
-                field_elem = elem.find(f".//{field}")
-            # Try local name match
-            if field_elem is None:
-                for child in elem.iter():
-                    local_name = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-                    if local_name == field:
-                        field_elem = child
-                        break
-
+        for field in simple_fields:
+            field_elem = self._find_element(elem, ns, field)
             if field_elem is not None and field_elem.text:
                 data["fields"][field] = field_elem.text.strip()
 
+        # Compound fields: XML element has value + "type" attribute
+        # DB stores as separate keys: xxxValue and xxxType
+        compound_fields = [
+            ("eligibilityID", "eligibilityIDValue", "eligibilityIDType"),
+            ("registrantID", "registrantIDValue", "registrantIDType"),
+        ]
+
+        for xml_name, value_key, type_key in compound_fields:
+            field_elem = self._find_element(elem, ns, xml_name)
+            if field_elem is not None:
+                if field_elem.text:
+                    data["fields"][value_key] = field_elem.text.strip()
+                type_attr = field_elem.get("type")
+                if type_attr:
+                    data["fields"][type_key] = type_attr.strip()
+
+        # Also check for separate xxxType/xxxIDType elements (from flat client formats)
+        for type_field in ["eligibilityIDType", "registrantIDType"]:
+            if type_field not in data["fields"]:
+                field_elem = self._find_element(elem, ns, type_field)
+                if field_elem is not None and field_elem.text:
+                    data["fields"][type_field] = field_elem.text.strip()
+
         return data
+
+    def _find_element(self, parent: etree._Element, ns: str, local_name: str):
+        """Find child element by local name, trying namespace and non-namespace variants."""
+        elem = parent.find(f"{{{ns}}}{local_name}") if ns else None
+        if elem is None:
+            elem = parent.find(f".//{local_name}")
+        if elem is None:
+            for child in parent.iter():
+                tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                if tag == local_name:
+                    return child
+        return elem
 
     def _parse_ae_domain(self, elem: etree._Element, ns: str) -> Dict[str, Any]:
         """
