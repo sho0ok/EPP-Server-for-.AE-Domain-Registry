@@ -23,14 +23,11 @@ from typing import Any, Dict, List, Optional
 from src.commands.base import (
     ObjectCommandHandler,
     CommandError,
-    ObjectNotFoundError,
-    AuthorizationError,
 )
 from src.core.session_manager import SessionInfo
 from src.core.xml_processor import EPPCommand
 from src.database.plsql_caller import get_plsql_caller
 from src.database.repositories.domain_repo import get_domain_repo
-from src.database.repositories.extension_repo import get_extension_repo
 from src.utils.password_utils import generate_auth_info, validate_auth_info
 from src.commands.extensions.ar_extension import (
     ArUndeleteHandler,
@@ -115,20 +112,21 @@ class DomainInfoHandler(ObjectCommandHandler):
     """
     Handle domain:info command.
 
-    Uses domain_repo for reading (since we need to build detailed XML response
-    with extensions, DNSSEC, IDN, KV data). The stored procedure returns
-    complex nested objects that are harder to extract.
+    Calls epp_domain.domain_info() stored procedure.
+    PL/SQL handles authorization, auth info visibility, hosts filtering,
+    and returns all data including extensions, DNSSEC, and IDN.
     """
 
     command_name = "info"
     object_type = "domain"
+    plsql_managed = True  # PL/SQL proc handles transaction logging
 
     async def handle(
         self,
         command: EPPCommand,
         session: SessionInfo
     ) -> bytes:
-        """Process domain:info command."""
+        """Process domain:info command via PL/SQL."""
         cl_trid = command.client_transaction_id
         data = command.data
 
@@ -143,151 +141,186 @@ class DomainInfoHandler(ObjectCommandHandler):
         auth_info = data.get("authInfo")
         hosts_filter = data.get("hosts", "all")
 
-        # Get domain data via repository (for detailed info with extensions)
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
-
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
-
-        # Check authorization for auth info
-        include_auth = False
-        sponsoring_account = domain.get("_account_id")
-
-        if session.account_id == sponsoring_account:
-            include_auth = True
-        elif auth_info:
-            if await domain_repo.verify_auth_info(domain_name, auth_info):
-                include_auth = True
-
-        if include_auth:
-            domain = await domain_repo.get_by_name(domain_name, include_auth=True)
-
-        # Filter hosts
-        if hosts_filter == "none":
-            domain["nameservers"] = []
-            domain["hosts"] = []
-        elif hosts_filter == "del":
-            domain["hosts"] = []
-        elif hosts_filter == "sub":
-            domain["nameservers"] = []
-
-        # Get extension data
-        extension_repo = await get_extension_repo()
-        domain_roid = domain.get("roid")
-        extension_data = await extension_repo.get_domain_extension_data(domain_roid)
-
-        extensions_response = None
-        if extension_data:
-            extensions_response = self._format_extension_data(extension_data)
-
-        # Get Phase 7-11 extension data
-        extension_elements = []
-
-        try:
-            secdns_data = await extension_repo.get_domain_secdns_data(domain_roid)
-            if secdns_data:
-                secdns_elem = self.response_builder.build_secdns_info_data(secdns_data)
-                if secdns_elem is not None:
-                    extension_elements.append(secdns_elem)
-        except Exception:
-            pass
-
-        try:
-            idn_data = await extension_repo.get_domain_idn_data(domain_roid)
-            if idn_data:
-                idn_elem = self.response_builder.build_idn_info_data(
-                    user_form=idn_data.get("USER_FORM"),
-                    language=idn_data.get("LANGUAGE"),
-                    canonical_form=idn_data.get("CANONICAL_FORM")
-                )
-                if idn_elem is not None:
-                    extension_elements.append(idn_elem)
-        except Exception:
-            pass
-
-        try:
-            variant_data = await extension_repo.get_domain_variants(domain_roid)
-            if variant_data:
-                variants = [
-                    {"name": v.get("VARIANT_NAME"), "userForm": v.get("USER_FORM")}
-                    for v in variant_data
-                ]
-                variant_elem = self.response_builder.build_variant_info_data(variants)
-                if variant_elem is not None:
-                    extension_elements.append(variant_elem)
-        except Exception:
-            pass
-
-        try:
-            kv_data = await extension_repo.get_domain_kv_data(domain_roid)
-            if kv_data:
-                kv_elem = self.response_builder.build_kv_info_data(kv_data)
-                if kv_elem is not None:
-                    extension_elements.append(kv_elem)
-        except Exception:
-            pass
-
-        # Set audit log
-        self.set_transaction_data(
-            roid=domain_roid,
-            audit_log=f"Domain Info: {domain_name}"
+        # Call ARI's stored procedure - handles auth, hosts filtering, everything
+        plsql = await get_plsql_caller()
+        result = await plsql.domain_info(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            name=domain_name,
+            hosts=hosts_filter,
+            auth_info=auth_info
         )
 
-        # Build response
+        response_code = result.get("response_code", 2400)
+
+        if response_code >= 2000:
+            return self.response_builder.build_error(
+                code=response_code,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
+            )
+
+        # Build domain dict for build_domain_info_result()
+        domain = {
+            "name": result.get("name", domain_name),
+            "roid": result.get("roid", ""),
+            "statuses": result.get("statuses", []),
+            "registrant": result.get("registrant"),
+            "contacts": result.get("contacts", []),
+            "nameservers": result.get("nameservers", []),
+            "hosts": result.get("hosts", []),
+            "clID": result.get("clID", ""),
+            "crID": result.get("crID"),
+            "crDate": result.get("crDate"),
+            "upID": result.get("upID"),
+            "upDate": result.get("upDate"),
+            "exDate": result.get("exDate"),
+            "trDate": result.get("trDate"),
+            "authInfo": result.get("authInfo"),
+        }
+
         result_data = self.response_builder.build_domain_info_result(domain)
 
-        final_extensions = None
-        if extensions_response or extension_elements:
+        # Build extension elements from PL/SQL result
+        extension_elements = []
+
+        # TLD-specific extensions (aeext, auext, etc.) from PL/SQL current_values
+        for ext in result.get("extensions", []):
+            ext_name = ext.get("extension", "")
+            cv = ext.get("current_values", {})
+            if not cv:
+                continue
+
+            if ext_name == "aeext" or ext_name == "aeEligibility":
+                ae_elem = self.response_builder.build_ae_info_data(
+                    registrant_name=cv.get("registrantName", ""),
+                    eligibility_type=cv.get("eligibilityType", ""),
+                    registrant_id=cv.get("registrantID"),
+                    registrant_id_type=cv.get("registrantIDType"),
+                    eligibility_name=cv.get("eligibilityName"),
+                    eligibility_id=cv.get("eligibilityID"),
+                    eligibility_id_type=cv.get("eligibilityIDType"),
+                    policy_reason=int(cv["policyReason"]) if cv.get("policyReason") else None,
+                )
+                extension_elements.append(ae_elem)
+            elif ext_name == "auext":
+                au_elem = self.response_builder.build_au_info_data(
+                    registrant_name=cv.get("registrantName", ""),
+                    eligibility_type=cv.get("eligibilityType", ""),
+                    policy_reason=int(cv.get("policyReason", 1)),
+                    registrant_id=cv.get("registrantID"),
+                    registrant_id_type=cv.get("registrantIDType"),
+                    eligibility_name=cv.get("eligibilityName"),
+                    eligibility_id=cv.get("eligibilityID"),
+                    eligibility_id_type=cv.get("eligibilityIDType"),
+                )
+                extension_elements.append(au_elem)
+            else:
+                # Generic extension — build as KV list
+                items = [{"key": k, "value": v} for k, v in cv.items()]
+                if items:
+                    kv_elem = self.response_builder.build_kv_info_data(
+                        [{"name": ext_name, "items": items}]
+                    )
+                    extension_elements.append(kv_elem)
+
+        # DNSSEC extension
+        ds_data = result.get("dnssec_ds", [])
+        key_data = result.get("dnssec_keys", [])
+        if ds_data or key_data:
+            # Map PL/SQL field names to response builder field names
+            mapped_ds = []
+            for ds in ds_data:
+                entry = {
+                    "keyTag": ds.get("keyTag", 0),
+                    "alg": ds.get("algorithm", 0),
+                    "digestType": ds.get("digestType", 0),
+                    "digest": ds.get("digest", ""),
+                }
+                if ds.get("keyData"):
+                    kd = ds["keyData"]
+                    entry["keyData"] = {
+                        "flags": kd.get("flags", 0),
+                        "protocol": kd.get("protocol", 3),
+                        "alg": kd.get("algorithm", 0),
+                        "pubKey": kd.get("publicKey", ""),
+                    }
+                mapped_ds.append(entry)
+
+            mapped_keys = []
+            for kd in key_data:
+                mapped_keys.append({
+                    "flags": kd.get("flags", 0),
+                    "protocol": kd.get("protocol", 3),
+                    "alg": kd.get("algorithm", 0),
+                    "pubKey": kd.get("publicKey", ""),
+                })
+
+            secdns_elem = self.response_builder.build_secdns_info_data(
+                ds_data=mapped_ds or None,
+                key_data=mapped_keys or None
+            )
+            if secdns_elem is not None:
+                extension_elements.append(secdns_elem)
+
+        # IDN extension
+        idn_userform = result.get("idn_userform")
+        idn_language = result.get("idn_language")
+        idn_canonical = result.get("idn_canonical")
+        if idn_userform and idn_language:
+            idn_elem = self.response_builder.build_idn_info_data(
+                user_form=idn_userform,
+                language=idn_language,
+                canonical_form=idn_canonical or domain_name
+            )
+            if idn_elem is not None:
+                extension_elements.append(idn_elem)
+
+        logger.info(f"Domain info via PL/SQL: {domain_name}")
+
+        # For single or no extensions, use build_response directly
+        # For multiple, pass first and append rest to avoid double nesting
+        if len(extension_elements) == 0:
+            return self.response_builder.build_response(
+                code=response_code,
+                message=result.get("response_message"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid"),
+                result_data=result_data
+            )
+        elif len(extension_elements) == 1:
+            return self.response_builder.build_response(
+                code=response_code,
+                message=result.get("response_message"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid"),
+                result_data=result_data,
+                extensions=extension_elements[0]
+            )
+        else:
+            # Multiple extensions: build response with first, then append rest
             from lxml import etree
-            ext_container = etree.Element("{urn:ietf:params:xml:ns:epp-1.0}extension")
-
-            if extensions_response:
-                old_ext_xml = self.response_builder.build_extensions_response(extensions_response)
-                if old_ext_xml is not None:
-                    for child in old_ext_xml:
-                        ext_container.append(child)
-
-            for elem in extension_elements:
-                ext_container.append(elem)
-
-            if len(ext_container) > 0:
-                final_extensions = ext_container
-
-        return self.success_response(
-            cl_trid=cl_trid,
-            result_data=result_data,
-            extensions=final_extensions
-        )
-
-    def _format_extension_data(
-        self, extension_data: List[Dict[str, Any]]
-    ) -> Dict[str, Dict[str, str]]:
-        """Format extension data for EPP response."""
-        result: Dict[str, Dict[str, str]] = {}
-        for row in extension_data:
-            ext_name = row.get("EXT_NAME")
-            field_key = row.get("FIELD_KEY")
-            value = row.get("VALUE")
-            if ext_name and field_key:
-                if ext_name not in result:
-                    result[ext_name] = {"_uri": row.get("EXT_URI", "")}
-                result[ext_name][field_key] = value
-        return result
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            domain = await domain_repo.get_by_name(domain_name)
-            if domain:
-                return domain.get("roid")
-        return None
+            response_bytes = self.response_builder.build_response(
+                code=response_code,
+                message=result.get("response_message"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid"),
+                result_data=result_data,
+                extensions=extension_elements[0]
+            )
+            # Parse, add remaining extension elements, re-serialize
+            root = etree.fromstring(response_bytes)
+            ext_elem = root.find(".//{urn:ietf:params:xml:ns:epp-1.0}extension")
+            if ext_elem is None:
+                ext_elem = root.find(".//extension")
+            if ext_elem is not None:
+                for elem in extension_elements[1:]:
+                    ext_elem.append(elem)
+            return etree.tostring(
+                root, xml_declaration=True, encoding="UTF-8", pretty_print=False
+            )
 
 
 class DomainCreateHandler(ObjectCommandHandler):

@@ -7,22 +7,23 @@ Handles AusRegistry-specific EPP extension commands per arext-1.0 schema:
 - ArPolicyDelete: Delete domain for policy violation
 - ArPolicyUndelete: Restore domain deleted for policy violation
 
+All commands delegate to epp_arext.* PL/SQL stored procedures which handle
+authorization, status validation, billing, audit logging, and transaction recording.
+
 Namespace: urn:X-ar:params:xml:ns:arext-1.0
 """
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from src.commands.base import (
     ObjectCommandHandler,
     CommandError,
-    ObjectNotFoundError,
-    AuthorizationError,
 )
 from src.core.session_manager import SessionInfo
 from src.core.xml_processor import EPPCommand
-from src.database.repositories.domain_repo import get_domain_repo
+from src.database.plsql_caller import get_plsql_caller
 
 logger = logging.getLogger("epp.commands.ar_extension")
 
@@ -32,17 +33,15 @@ AREXT_NS = "urn:X-ar:params:xml:ns:arext-1.0"
 
 class ArUndeleteHandler(ObjectCommandHandler):
     """
-    Handle arext:command/undelete command.
+    Handle arext:command/undelete command via epp_arext.domain_undelete().
 
-    This is a PROTOCOL EXTENSION command that restores a domain
-    from the pending delete / redemption grace period.
-
-    Per arext-1.0.xsd, the command contains only:
-    - name: Domain name to restore
+    Restores a domain from pending delete / redemption grace period.
+    PL/SQL handles all validation, authorization, billing, and audit.
     """
 
     command_name = "ar_undelete"
     object_type = "domain"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -53,7 +52,6 @@ class ArUndeleteHandler(ObjectCommandHandler):
         cl_trid = command.client_transaction_id
         data = command.data
 
-        # Get domain name
         domain_name = data.get("name")
         if not domain_name:
             raise CommandError(
@@ -62,76 +60,49 @@ class ArUndeleteHandler(ObjectCommandHandler):
                 reason="Domain name required"
             )
 
-        # Get domain and verify
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
+        plsql = await get_plsql_caller()
+        result = await plsql.domain_undelete(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            name=domain_name
+        )
 
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
-
-        # Verify sponsoring registrar
-        if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError("Only sponsoring registrar can undelete domain")
-
-        # Check domain is in deletable state (pendingDelete or redemptionPeriod)
-        statuses = domain.get("statuses", [])
-        is_restorable = False
-        for status in statuses:
-            status_value = status.get("s") if isinstance(status, dict) else status
-            if status_value in ("pendingDelete", "redemptionPeriod"):
-                is_restorable = True
-                break
-
-        if not is_restorable:
-            raise CommandError(
-                2304,
-                "Object status prohibits operation",
-                reason="Domain is not in pending delete or redemption status"
+        rc = result.get("response_code", 2400)
+        if rc >= 2000:
+            return self.response_builder.build_error(
+                code=rc,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
             )
 
-        # Perform the undelete
-        try:
-            await domain_repo.undelete(
-                domain_roid=domain.get("roid"),
-                user_id=session.user_id
-            )
-        except Exception as e:
-            logger.error(f"Failed to undelete {domain_name}: {e}")
-            raise CommandError(2400, "Command failed", reason=str(e))
-
-        # Build response
-        result_data = self.response_builder.build_ar_undelete_result(name=domain_name)
+        result_data = self.response_builder.build_ar_undelete_result(
+            name=domain_name
+        )
 
         logger.info(f"Undeleted domain: {domain_name}")
 
-        return self.success_response(cl_trid=cl_trid, result_data=result_data)
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            return await domain_repo.get_roid(domain_name)
-        return None
+        return self.response_builder.build_response(
+            code=rc,
+            message=result.get("response_message"),
+            cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid"),
+            result_data=result_data
+        )
 
 
 class ArUnrenewHandler(ObjectCommandHandler):
     """
-    Handle arext:command/unrenew command.
+    Handle arext:command/unrenew command via epp_arext.domain_unrenew().
 
-    This is a PROTOCOL EXTENSION command that cancels a pending renewal
-    and reverts the domain to its previous expiry date.
-
-    Per arext-1.0.xsd, the command contains only:
-    - name: Domain name to unrenew
+    Cancels a pending renewal and reverts the domain to its previous expiry date.
+    PL/SQL handles all validation, authorization, billing refund, and audit.
     """
 
     command_name = "ar_unrenew"
     object_type = "domain"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -142,7 +113,6 @@ class ArUnrenewHandler(ObjectCommandHandler):
         cl_trid = command.client_transaction_id
         data = command.data
 
-        # Get domain name
         domain_name = data.get("name")
         if not domain_name:
             raise CommandError(
@@ -151,77 +121,70 @@ class ArUnrenewHandler(ObjectCommandHandler):
                 reason="Domain name required"
             )
 
-        # Get domain and verify
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
+        cur_exp_date = data.get("curExpDate")
+        if not cur_exp_date:
+            raise CommandError(
+                2003,
+                "Required parameter missing",
+                reason="curExpDate required for unrenew"
+            )
 
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
-
-        # Verify sponsoring registrar
-        if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError("Only sponsoring registrar can unrenew domain")
-
-        # Check domain status
-        statuses = domain.get("statuses", [])
-        for status in statuses:
-            status_value = status.get("s") if isinstance(status, dict) else status
-            if status_value in ("clientUpdateProhibited", "serverUpdateProhibited"):
+        # Parse date string to datetime if needed
+        if isinstance(cur_exp_date, str):
+            try:
+                cur_exp_date = datetime.strptime(cur_exp_date[:10], "%Y-%m-%d")
+            except ValueError:
                 raise CommandError(
-                    2304,
-                    "Object status prohibits operation",
-                    reason=f"Domain has {status_value} status"
+                    2005,
+                    "Parameter value syntax error",
+                    reason="Invalid curExpDate format"
                 )
 
-        # Perform the unrenew
-        try:
-            result = await domain_repo.unrenew(
-                domain_roid=domain.get("roid"),
-                user_id=session.user_id,
-                account_id=session.account_id
-            )
-        except Exception as e:
-            logger.error(f"Failed to unrenew {domain_name}: {e}")
-            raise CommandError(2400, "Command failed", reason=str(e))
-
-        # Build response with reverted expiry date
-        result_data = self.response_builder.build_ar_unrenew_result(
+        plsql = await get_plsql_caller()
+        result = await plsql.domain_unrenew(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
             name=domain_name,
-            ex_date=result.get("exDate")
+            cur_exp_date=cur_exp_date
+        )
+
+        rc = result.get("response_code", 2400)
+        if rc >= 2000:
+            return self.response_builder.build_error(
+                code=rc,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
+            )
+
+        result_data = self.response_builder.build_ar_unrenew_result(
+            name=result.get("name", domain_name),
+            ex_date=result.get("ex_date")
         )
 
         logger.info(f"Unrenewed domain: {domain_name}")
 
-        return self.success_response(cl_trid=cl_trid, result_data=result_data)
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            return await domain_repo.get_roid(domain_name)
-        return None
+        return self.response_builder.build_response(
+            code=rc,
+            message=result.get("response_message"),
+            cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid"),
+            result_data=result_data
+        )
 
 
 class ArPolicyDeleteHandler(ObjectCommandHandler):
     """
-    Handle arext:command/policyDelete command.
+    Handle arext:command/policyDelete command via epp_arext.domain_policy_delete().
 
-    This is a PROTOCOL EXTENSION command for registry-initiated or
-    policy-based domain deletion. The domain is deleted immediately
-    without a grace period.
-
-    Per arext-1.0.xsd, the command contains:
-    - name: Domain name to delete
-    - reason: Optional reason for deletion
+    Deletes domain for policy violation. Registry-initiated operation.
+    PL/SQL handles all validation, authorization, and audit.
     """
 
     command_name = "ar_policy_delete"
     object_type = "domain"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -232,7 +195,6 @@ class ArPolicyDeleteHandler(ObjectCommandHandler):
         cl_trid = command.client_transaction_id
         data = command.data
 
-        # Get domain name
         domain_name = data.get("name")
         if not domain_name:
             raise CommandError(
@@ -243,62 +205,45 @@ class ArPolicyDeleteHandler(ObjectCommandHandler):
 
         reason = data.get("reason")
 
-        # Get domain and verify
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
+        plsql = await get_plsql_caller()
+        result = await plsql.domain_policy_delete(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            name=domain_name,
+            reason=reason
+        )
 
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
-
-        # Verify sponsoring registrar OR registry operator permission
-        if domain.get("_account_id") != session.account_id:
-            # Check if user has registry operator permissions
-            if not session.is_registry_operator:
-                raise AuthorizationError(
-                    "Only sponsoring registrar or registry operator can policy delete"
-                )
-
-        # Perform the policy delete
-        try:
-            await domain_repo.policy_delete(
-                domain_roid=domain.get("roid"),
-                user_id=session.user_id,
-                reason=reason
+        rc = result.get("response_code", 2400)
+        if rc >= 2000:
+            return self.response_builder.build_error(
+                code=rc,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
             )
-        except Exception as e:
-            logger.error(f"Failed to policy delete {domain_name}: {e}")
-            raise CommandError(2400, "Command failed", reason=str(e))
 
         logger.info(f"Policy deleted domain: {domain_name} (reason: {reason})")
 
-        return self.success_response(cl_trid=cl_trid)
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            return await domain_repo.get_roid(domain_name)
-        return None
+        return self.response_builder.build_response(
+            code=rc,
+            message=result.get("response_message"),
+            cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid")
+        )
 
 
 class ArPolicyUndeleteHandler(ObjectCommandHandler):
     """
-    Handle arext:command/policyUndelete command.
+    Handle arext:command/policyUndelete command via epp_arext.domain_policy_undelete().
 
-    This is a PROTOCOL EXTENSION command that restores a domain
-    that was deleted due to policy violation.
-
-    Per arext-1.0.xsd, the command contains only:
-    - name: Domain name to restore
+    Restores a domain that was deleted due to policy violation.
+    PL/SQL handles all validation, authorization, and audit.
     """
 
     command_name = "ar_policy_undelete"
     object_type = "domain"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -309,7 +254,6 @@ class ArPolicyUndeleteHandler(ObjectCommandHandler):
         cl_trid = command.client_transaction_id
         data = command.data
 
-        # Get domain name
         domain_name = data.get("name")
         if not domain_name:
             raise CommandError(
@@ -318,47 +262,36 @@ class ArPolicyUndeleteHandler(ObjectCommandHandler):
                 reason="Domain name required"
             )
 
-        # Get domain and verify
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
+        plsql = await get_plsql_caller()
+        result = await plsql.domain_policy_undelete(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            name=domain_name
+        )
 
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
-
-        # Verify registry operator permission
-        if not session.is_registry_operator:
-            raise AuthorizationError(
-                "Only registry operator can policy undelete domains"
+        rc = result.get("response_code", 2400)
+        if rc >= 2000:
+            return self.response_builder.build_error(
+                code=rc,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
             )
 
-        # Perform the policy undelete
-        try:
-            await domain_repo.policy_undelete(
-                domain_roid=domain.get("roid"),
-                user_id=session.user_id
-            )
-        except Exception as e:
-            logger.error(f"Failed to policy undelete {domain_name}: {e}")
-            raise CommandError(2400, "Command failed", reason=str(e))
-
-        # Build response
-        result_data = self.response_builder.build_ar_undelete_result(name=domain_name)
+        result_data = self.response_builder.build_ar_undelete_result(
+            name=domain_name
+        )
 
         logger.info(f"Policy undeleted domain: {domain_name}")
 
-        return self.success_response(cl_trid=cl_trid, result_data=result_data)
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            return await domain_repo.get_roid(domain_name)
-        return None
+        return self.response_builder.build_response(
+            code=rc,
+            message=result.get("response_message"),
+            cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid"),
+            result_data=result_data
+        )
 
 
 # Handler registry for AR extension commands

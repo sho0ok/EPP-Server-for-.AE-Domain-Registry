@@ -772,13 +772,116 @@ class EPPProcedureCaller:
         """
         Call epp_domain.domain_info() to get domain information.
 
+        Uses indexed bind variable pattern to extract all collection fields
+        (statuses, contacts, nameservers, hosts, extensions, DNSSEC, IDN).
+
         Returns:
-            Dict with domain info and response data
+            Dict with full domain info including all collections
         """
         authinfo_literal = (
             f"epp_authinfo_t('{self._escape_sql(auth_info)}', NULL)"
             if auth_info else "epp_authinfo_t()"
         )
+
+        date_fmt = 'YYYY-MM-DD"T"HH24:MI:SS".0Z"'
+
+        # Max items for each collection
+        max_statuses = 20
+        max_contacts = 10
+        max_ns = 13
+        max_hosts = 20
+        max_extensions = 5
+        max_kv_per_ext = 20
+        max_ds_data = 10
+        max_key_data = 10
+
+        # Build dynamic PL/SQL extraction for statuses
+        status_extraction = []
+        for i in range(max_statuses):
+            status_extraction.append(f"""
+                IF l_infdata.status IS NOT NULL AND l_infdata.status.COUNT >= {i + 1} THEN
+                    :st_s_{i} := l_infdata.status({i + 1}).value;
+                END IF;
+            """)
+
+        # Contacts
+        contact_extraction = []
+        for i in range(max_contacts):
+            contact_extraction.append(f"""
+                IF l_infdata.contact IS NOT NULL AND l_infdata.contact.COUNT >= {i + 1} THEN
+                    :ct_id_{i} := l_infdata.contact({i + 1}).id;
+                    :ct_type_{i} := l_infdata.contact({i + 1}).contact_type;
+                END IF;
+            """)
+
+        # Nameservers (epp_hos_list_t = TABLE OF varchar2)
+        ns_extraction = []
+        for i in range(max_ns):
+            ns_extraction.append(f"""
+                IF l_infdata.ns IS NOT NULL AND l_infdata.ns.COUNT >= {i + 1} THEN
+                    :ns_{i} := l_infdata.ns({i + 1});
+                END IF;
+            """)
+
+        # Subordinate hosts
+        host_extraction = []
+        for i in range(max_hosts):
+            host_extraction.append(f"""
+                IF l_infdata.host IS NOT NULL AND l_infdata.host.COUNT >= {i + 1} THEN
+                    :host_{i} := l_infdata.host({i + 1});
+                END IF;
+            """)
+
+        # Extensions (extension_list_t → extension_t objects with nested KV pairs)
+        ext_extraction = []
+        for i in range(max_extensions):
+            ext_extraction.append(f"""
+                IF l_infdata.extensions IS NOT NULL AND l_infdata.extensions.COUNT >= {i + 1} THEN
+                    :ext_name_{i} := l_infdata.extensions({i + 1}).extension;
+                    :ext_reason_{i} := l_infdata.extensions({i + 1}).reason;
+                    :ext_cv_count_{i} := CASE WHEN l_infdata.extensions({i + 1}).current_values IS NOT NULL
+                        THEN l_infdata.extensions({i + 1}).current_values.COUNT ELSE 0 END;
+                    -- Serialize current_values as pipe-delimited key~value pairs
+                    IF l_infdata.extensions({i + 1}).current_values IS NOT NULL THEN
+                        FOR j IN 1..l_infdata.extensions({i + 1}).current_values.COUNT LOOP
+                            :ext_cv_{i} := :ext_cv_{i} || l_infdata.extensions({i + 1}).current_values(j).key
+                                || '~' || l_infdata.extensions({i + 1}).current_values(j).value || '|';
+                        END LOOP;
+                    END IF;
+                END IF;
+            """)
+
+        # DNSSEC DS data
+        ds_extraction = []
+        for i in range(max_ds_data):
+            ds_extraction.append(f"""
+                IF l_infdata.dnssec_data IS NOT NULL AND l_infdata.dnssec_data.ds_data IS NOT NULL
+                   AND l_infdata.dnssec_data.ds_data.COUNT >= {i + 1} THEN
+                    :ds_keytag_{i} := l_infdata.dnssec_data.ds_data({i + 1}).keytag;
+                    :ds_alg_{i} := l_infdata.dnssec_data.ds_data({i + 1}).algorithm;
+                    :ds_digtype_{i} := l_infdata.dnssec_data.ds_data({i + 1}).digest_type;
+                    :ds_digest_{i} := l_infdata.dnssec_data.ds_data({i + 1}).digest;
+                    IF l_infdata.dnssec_data.ds_data({i + 1}).keydata IS NOT NULL THEN
+                        :ds_kd_flags_{i} := l_infdata.dnssec_data.ds_data({i + 1}).keydata.flags;
+                        :ds_kd_proto_{i} := l_infdata.dnssec_data.ds_data({i + 1}).keydata.protocol;
+                        :ds_kd_alg_{i} := l_infdata.dnssec_data.ds_data({i + 1}).keydata.algorithm;
+                        :ds_kd_pubkey_{i} := l_infdata.dnssec_data.ds_data({i + 1}).keydata.public_key;
+                    END IF;
+                END IF;
+            """)
+
+        # DNSSEC standalone key data
+        key_extraction = []
+        for i in range(max_key_data):
+            key_extraction.append(f"""
+                IF l_infdata.dnssec_data IS NOT NULL AND l_infdata.dnssec_data.key_data IS NOT NULL
+                   AND l_infdata.dnssec_data.key_data.COUNT >= {i + 1} THEN
+                    :kd_flags_{i} := l_infdata.dnssec_data.key_data({i + 1}).flags;
+                    :kd_proto_{i} := l_infdata.dnssec_data.key_data({i + 1}).protocol;
+                    :kd_alg_{i} := l_infdata.dnssec_data.key_data({i + 1}).algorithm;
+                    :kd_pubkey_{i} := l_infdata.dnssec_data.key_data({i + 1}).public_key;
+                END IF;
+            """)
 
         sql = f"""
             DECLARE
@@ -822,21 +925,42 @@ class EPPProcedureCaller:
                     :inf_registrant := l_infdata.registrant;
                     :inf_clid := l_infdata.clid;
                     :inf_crid := l_infdata.crid;
-                    :inf_crdate := TO_CHAR(l_infdata.crdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :inf_crdate := TO_CHAR(l_infdata.crdate, '{date_fmt}');
                     :inf_upid := l_infdata.upid;
-                    :inf_update := TO_CHAR(l_infdata.up_date, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
-                    :inf_exdate := TO_CHAR(l_infdata.exdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
-                    :inf_trdate := TO_CHAR(l_infdata.trdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+                    :inf_update := TO_CHAR(l_infdata.up_date, '{date_fmt}');
+                    :inf_exdate := TO_CHAR(l_infdata.exdate, '{date_fmt}');
+                    :inf_trdate := TO_CHAR(l_infdata.trdate, '{date_fmt}');
 
                     IF l_infdata.authinfo IS NOT NULL THEN
                         :inf_authinfo := l_infdata.authinfo.pw;
                     END IF;
 
-                    -- Count nameservers and contacts for subsequent retrieval
-                    :inf_ns_count := CASE WHEN l_infdata.ns IS NOT NULL THEN l_infdata.ns.COUNT ELSE 0 END;
-                    :inf_contact_count := CASE WHEN l_infdata.contact IS NOT NULL THEN l_infdata.contact.COUNT ELSE 0 END;
+                    -- Collection counts
                     :inf_status_count := CASE WHEN l_infdata.status IS NOT NULL THEN l_infdata.status.COUNT ELSE 0 END;
+                    :inf_contact_count := CASE WHEN l_infdata.contact IS NOT NULL THEN l_infdata.contact.COUNT ELSE 0 END;
+                    :inf_ns_count := CASE WHEN l_infdata.ns IS NOT NULL THEN l_infdata.ns.COUNT ELSE 0 END;
                     :inf_host_count := CASE WHEN l_infdata.host IS NOT NULL THEN l_infdata.host.COUNT ELSE 0 END;
+                    :inf_ext_count := CASE WHEN l_infdata.extensions IS NOT NULL THEN l_infdata.extensions.COUNT ELSE 0 END;
+                    :inf_ds_count := CASE WHEN l_infdata.dnssec_data IS NOT NULL AND l_infdata.dnssec_data.ds_data IS NOT NULL
+                        THEN l_infdata.dnssec_data.ds_data.COUNT ELSE 0 END;
+                    :inf_kd_count := CASE WHEN l_infdata.dnssec_data IS NOT NULL AND l_infdata.dnssec_data.key_data IS NOT NULL
+                        THEN l_infdata.dnssec_data.key_data.COUNT ELSE 0 END;
+
+                    -- IDN data (single object, not collection)
+                    IF l_infdata.idn_data IS NOT NULL THEN
+                        :inf_idn_userform := l_infdata.idn_data.userform;
+                        :inf_idn_canonical := l_infdata.idn_data.canonicalform;
+                        :inf_idn_lang := l_infdata.idn_data.lang;
+                    END IF;
+
+                    -- Extract collections
+                    {"".join(status_extraction)}
+                    {"".join(contact_extraction)}
+                    {"".join(ns_extraction)}
+                    {"".join(host_extraction)}
+                    {"".join(ext_extraction)}
+                    {"".join(ds_extraction)}
+                    {"".join(key_extraction)}
                 END IF;
             END;
         """
@@ -850,9 +974,11 @@ class EPPProcedureCaller:
                 "cltrid": cltrid,
                 "name": name,
                 "hosts": hosts,
+                # Response
                 "response_code": cursor.var(int),
                 "response_msg": cursor.var(str, 4000),
                 "sv_trid": cursor.var(str, 64),
+                # Scalar fields
                 "inf_name": cursor.var(str, 255),
                 "inf_roid": cursor.var(str, 89),
                 "inf_registrant": cursor.var(str, 16),
@@ -864,17 +990,147 @@ class EPPProcedureCaller:
                 "inf_exdate": cursor.var(str, 30),
                 "inf_trdate": cursor.var(str, 30),
                 "inf_authinfo": cursor.var(str, 255),
-                "inf_ns_count": cursor.var(int),
-                "inf_contact_count": cursor.var(int),
+                # Collection counts
                 "inf_status_count": cursor.var(int),
+                "inf_contact_count": cursor.var(int),
+                "inf_ns_count": cursor.var(int),
                 "inf_host_count": cursor.var(int),
+                "inf_ext_count": cursor.var(int),
+                "inf_ds_count": cursor.var(int),
+                "inf_kd_count": cursor.var(int),
+                # IDN data
+                "inf_idn_userform": cursor.var(str, 255),
+                "inf_idn_canonical": cursor.var(str, 255),
+                "inf_idn_lang": cursor.var(str, 50),
             }
+
+            # Indexed binds for collections
+            for i in range(max_statuses):
+                binds[f"st_s_{i}"] = cursor.var(str, 24)
+            for i in range(max_contacts):
+                binds[f"ct_id_{i}"] = cursor.var(str, 16)
+                binds[f"ct_type_{i}"] = cursor.var(str, 10)
+            for i in range(max_ns):
+                binds[f"ns_{i}"] = cursor.var(str, 255)
+            for i in range(max_hosts):
+                binds[f"host_{i}"] = cursor.var(str, 255)
+            for i in range(max_extensions):
+                binds[f"ext_name_{i}"] = cursor.var(str, 100)
+                binds[f"ext_reason_{i}"] = cursor.var(str, 1000)
+                binds[f"ext_cv_count_{i}"] = cursor.var(int)
+                binds[f"ext_cv_{i}"] = cursor.var(str, 4000)
+            for i in range(max_ds_data):
+                binds[f"ds_keytag_{i}"] = cursor.var(int)
+                binds[f"ds_alg_{i}"] = cursor.var(int)
+                binds[f"ds_digtype_{i}"] = cursor.var(int)
+                binds[f"ds_digest_{i}"] = cursor.var(str, 255)
+                binds[f"ds_kd_flags_{i}"] = cursor.var(int)
+                binds[f"ds_kd_proto_{i}"] = cursor.var(int)
+                binds[f"ds_kd_alg_{i}"] = cursor.var(int)
+                binds[f"ds_kd_pubkey_{i}"] = cursor.var(str, 4000)
+            for i in range(max_key_data):
+                binds[f"kd_flags_{i}"] = cursor.var(int)
+                binds[f"kd_proto_{i}"] = cursor.var(int)
+                binds[f"kd_alg_{i}"] = cursor.var(int)
+                binds[f"kd_pubkey_{i}"] = cursor.var(str, 4000)
 
             cursor.execute(sql, binds)
             conn.commit()
-            cursor.close()
 
             response_code = self._extract_var(binds["response_code"], 2400)
+
+            # Extract statuses
+            statuses = []
+            status_count = self._extract_var(binds["inf_status_count"], 0)
+            for i in range(min(status_count, max_statuses)):
+                s = self._extract_var(binds[f"st_s_{i}"], None)
+                if s:
+                    statuses.append({"s": s})
+
+            # Extract contacts
+            contacts = []
+            contact_count = self._extract_var(binds["inf_contact_count"], 0)
+            for i in range(min(contact_count, max_contacts)):
+                cid = self._extract_var(binds[f"ct_id_{i}"], None)
+                if cid:
+                    contacts.append({
+                        "id": cid,
+                        "type": self._extract_var(binds[f"ct_type_{i}"], "")
+                    })
+
+            # Extract nameservers
+            nameservers = []
+            ns_count = self._extract_var(binds["inf_ns_count"], 0)
+            for i in range(min(ns_count, max_ns)):
+                ns = self._extract_var(binds[f"ns_{i}"], None)
+                if ns:
+                    nameservers.append(ns)
+
+            # Extract subordinate hosts
+            sub_hosts = []
+            host_count = self._extract_var(binds["inf_host_count"], 0)
+            for i in range(min(host_count, max_hosts)):
+                h = self._extract_var(binds[f"host_{i}"], None)
+                if h:
+                    sub_hosts.append(h)
+
+            # Extract extensions
+            extensions = []
+            ext_count = self._extract_var(binds["inf_ext_count"], 0)
+            for i in range(min(ext_count, max_extensions)):
+                ext_name = self._extract_var(binds[f"ext_name_{i}"], None)
+                if ext_name:
+                    ext_entry = {
+                        "extension": ext_name,
+                        "reason": self._extract_var(binds[f"ext_reason_{i}"], ""),
+                        "current_values": {}
+                    }
+                    # Parse pipe-delimited KV string
+                    cv_str = self._extract_var(binds[f"ext_cv_{i}"], "")
+                    if cv_str:
+                        for pair in cv_str.split("|"):
+                            if "~" in pair:
+                                k, v = pair.split("~", 1)
+                                ext_entry["current_values"][k] = v
+                    extensions.append(ext_entry)
+
+            # Extract DNSSEC DS data
+            ds_data_list = []
+            ds_count = self._extract_var(binds["inf_ds_count"], 0)
+            for i in range(min(ds_count, max_ds_data)):
+                keytag = self._extract_var(binds[f"ds_keytag_{i}"], None)
+                if keytag is not None:
+                    ds_entry = {
+                        "keyTag": keytag,
+                        "algorithm": self._extract_var(binds[f"ds_alg_{i}"], 0),
+                        "digestType": self._extract_var(binds[f"ds_digtype_{i}"], 0),
+                        "digest": self._extract_var(binds[f"ds_digest_{i}"], ""),
+                    }
+                    # Nested key data within DS
+                    kd_flags = self._extract_var(binds[f"ds_kd_flags_{i}"], None)
+                    if kd_flags is not None:
+                        ds_entry["keyData"] = {
+                            "flags": kd_flags,
+                            "protocol": self._extract_var(binds[f"ds_kd_proto_{i}"], 0),
+                            "algorithm": self._extract_var(binds[f"ds_kd_alg_{i}"], 0),
+                            "publicKey": self._extract_var(binds[f"ds_kd_pubkey_{i}"], ""),
+                        }
+                    ds_data_list.append(ds_entry)
+
+            # Extract DNSSEC standalone key data
+            key_data_list = []
+            kd_count = self._extract_var(binds["inf_kd_count"], 0)
+            for i in range(min(kd_count, max_key_data)):
+                flags = self._extract_var(binds[f"kd_flags_{i}"], None)
+                if flags is not None:
+                    key_data_list.append({
+                        "flags": flags,
+                        "protocol": self._extract_var(binds[f"kd_proto_{i}"], 0),
+                        "algorithm": self._extract_var(binds[f"kd_alg_{i}"], 0),
+                        "publicKey": self._extract_var(binds[f"kd_pubkey_{i}"], ""),
+                    })
+
+            cursor.close()
 
             return {
                 "response_code": response_code,
@@ -891,6 +1147,16 @@ class EPPProcedureCaller:
                 "exDate": self._extract_var(binds["inf_exdate"], None),
                 "trDate": self._extract_var(binds["inf_trdate"], None),
                 "authInfo": self._extract_var(binds["inf_authinfo"], None),
+                "statuses": statuses,
+                "contacts": contacts,
+                "nameservers": nameservers,
+                "hosts": sub_hosts,
+                "extensions": extensions,
+                "idn_userform": self._extract_var(binds["inf_idn_userform"], None),
+                "idn_canonical": self._extract_var(binds["inf_idn_canonical"], None),
+                "idn_language": self._extract_var(binds["inf_idn_lang"], None),
+                "dnssec_ds": ds_data_list,
+                "dnssec_keys": key_data_list,
             }
 
     async def domain_delete(
@@ -2850,6 +3116,400 @@ class EPPProcedureCaller:
                 "dom_pan_trid_cl": self._extract_var(binds["dom_pan_trid_cl"], None),
                 "dom_pan_trid_sv": self._extract_var(binds["dom_pan_trid_sv"], None),
                 "dom_pan_date": self._extract_var(binds["dom_pan_date"], None),
+            }
+
+    # ========================================================================
+    # AR Extension Operations (epp_arext package)
+    # ========================================================================
+
+    async def domain_undelete(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str
+    ) -> Dict[str, Any]:
+        """
+        Call epp_arext.domain_undelete() to restore a deleted domain.
+
+        Returns:
+            Dict with response_code, response_message, sv_trid
+        """
+        sql = """
+            DECLARE
+                l_response epp_response_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_arext.domain_undelete(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    async def domain_unrenew(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str,
+        cur_exp_date: datetime
+    ) -> Dict[str, Any]:
+        """
+        Call epp_arext.domain_unrenew() to cancel a pending renewal.
+
+        Returns:
+            Dict with response_code, response_message, sv_trid, name, ex_date
+        """
+        sql = """
+            DECLARE
+                l_response epp_response_t;
+                l_rname    eppcom.labeltype;
+                l_exdate   DATE;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_arext.domain_unrenew(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    curexpdate    => :cur_exp_date,
+                    response      => l_response,
+                    rname         => l_rname,
+                    exdate        => l_exdate
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+                :r_name := l_rname;
+                :ex_date := TO_CHAR(l_exdate, 'YYYY-MM-DD"T"HH24:MI:SS".0Z"');
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "cur_exp_date": cur_exp_date,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "r_name": cursor.var(str, 255),
+                "ex_date": cursor.var(str, 30)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "name": self._extract_var(binds["r_name"], name),
+                "ex_date": self._extract_var(binds["ex_date"], None)
+            }
+
+    async def domain_policy_delete(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str,
+        reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Call epp_arext.domain_policy_delete() to delete domain for policy violation.
+
+        Returns:
+            Dict with response_code, response_message, sv_trid
+        """
+        sql = """
+            DECLARE
+                l_response epp_response_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_arext.domain_policy_delete(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    reason        => :reason,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "reason": reason or "",
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    async def domain_policy_undelete(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str
+    ) -> Dict[str, Any]:
+        """
+        Call epp_arext.domain_policy_undelete() to restore a policy-deleted domain.
+
+        Returns:
+            Dict with response_code, response_message, sv_trid
+        """
+        sql = """
+            DECLARE
+                l_response epp_response_t;
+                l_code     NUMBER;
+                l_msg      VARCHAR2(4000);
+                l_svtrid   VARCHAR2(64);
+            BEGIN
+                epp_arext.domain_policy_undelete(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    response      => l_response
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None)
+            }
+
+    async def registrant_transfer(
+        self,
+        connection_id: int,
+        session_id: int,
+        cltrid: Optional[str],
+        name: str,
+        cur_exp_date: datetime,
+        period: int,
+        period_unit: str,
+        registrant_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Call epp_arext.registrant_transfer() to transfer domain to new registrant.
+
+        Args:
+            registrant_data: Dict with 'extension', 'new_values' (dict of KV pairs), 'reason'
+
+        Returns:
+            Dict with response_code, response_message, sv_trid, name, request_date, ex_date
+        """
+        # Build extension_t literal for the registrant parameter
+        ext_name = self._escape_sql(registrant_data.get("extension", ""))
+        reason = self._escape_sql(registrant_data.get("reason", ""))
+        current_kv = self._build_kv_list_literal(registrant_data.get("current_values"))
+        new_kv = self._build_kv_list_literal(registrant_data.get("new_values"))
+        ext_literal = f"extension_t('{ext_name}', {current_kv}, {new_kv}, '{reason}')"
+
+        date_fmt = 'YYYY-MM-DD"T"HH24:MI:SS".0Z"'
+
+        sql = f"""
+            DECLARE
+                l_response    epp_response_t;
+                l_registrant  extension_t := {ext_literal};
+                l_rname       eppcom.labeltype;
+                l_rdate       DATE;
+                l_exdate      DATE;
+                l_code        NUMBER;
+                l_msg         VARCHAR2(4000);
+                l_svtrid      VARCHAR2(64);
+            BEGIN
+                epp_arext.registrant_transfer(
+                    connection_id => :connection_id,
+                    session_id    => :session_id,
+                    cltrid        => :cltrid,
+                    name          => :name,
+                    curexpdate    => :cur_exp_date,
+                    period        => :period,
+                    period_unit   => :period_unit,
+                    registrant    => l_registrant,
+                    response      => l_response,
+                    rname         => l_rname,
+                    rdate         => l_rdate,
+                    exdate        => l_exdate
+                );
+
+                IF l_response.result IS NOT NULL AND l_response.result.COUNT > 0 THEN
+                    l_code := l_response.result(1).code;
+                    IF l_response.result(1).msg IS NOT NULL THEN
+                        l_msg := l_response.result(1).msg.string;
+                    END IF;
+                END IF;
+
+                IF l_response.trid IS NOT NULL THEN
+                    l_svtrid := l_response.trid.svTRID;
+                END IF;
+
+                :response_code := l_code;
+                :response_msg := l_msg;
+                :sv_trid := l_svtrid;
+                :r_name := l_rname;
+                :r_date := TO_CHAR(l_rdate, '{date_fmt}');
+                :ex_date := TO_CHAR(l_exdate, '{date_fmt}');
+            END;
+        """
+
+        async with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            binds = {
+                "connection_id": connection_id,
+                "session_id": session_id,
+                "cltrid": cltrid,
+                "name": name,
+                "cur_exp_date": cur_exp_date,
+                "period": period,
+                "period_unit": period_unit,
+                "response_code": cursor.var(int),
+                "response_msg": cursor.var(str, 4000),
+                "sv_trid": cursor.var(str, 64),
+                "r_name": cursor.var(str, 255),
+                "r_date": cursor.var(str, 30),
+                "ex_date": cursor.var(str, 30)
+            }
+
+            cursor.execute(sql, binds)
+            conn.commit()
+            cursor.close()
+
+            return {
+                "response_code": self._extract_var(binds["response_code"], 2400),
+                "response_message": self._extract_var(binds["response_msg"], ""),
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "name": self._extract_var(binds["r_name"], name),
+                "request_date": self._extract_var(binds["r_date"], None),
+                "ex_date": self._extract_var(binds["ex_date"], None)
             }
 
 

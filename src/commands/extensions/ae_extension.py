@@ -9,7 +9,7 @@ Namespace: urn:X-ae:params:xml:ns:aeext-1.0
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.commands.base import (
@@ -21,7 +21,6 @@ from src.commands.base import (
 from src.core.session_manager import SessionInfo
 from src.core.xml_processor import EPPCommand
 from src.database.repositories.domain_repo import get_domain_repo
-from src.database.repositories.account_repo import get_account_repo
 from src.database.repositories.extension_repo import get_extension_repo
 
 logger = logging.getLogger("epp.commands.ae_extension")
@@ -237,15 +236,11 @@ class AeDomainModifyRegistrantHandler(ObjectCommandHandler):
 
 class AeDomainTransferRegistrantHandler(ObjectCommandHandler):
     """
-    Handle aeext:command/registrantTransfer command.
+    Handle aeext:command/registrantTransfer command via epp_arext.registrant_transfer().
 
-    This is a PROTOCOL EXTENSION command (not a standard EPP command).
-    It transfers a .ae domain to a new legal registrant entity.
-
-    This is different from standard domain transfer - it changes legal ownership
-    and results in:
-    - New validity period starting from transfer completion
-    - Create fee being charged to the requesting client
+    Transfers a .ae domain to a new legal registrant entity.
+    PL/SQL handles domain lookup, status validation, billing, registrant data
+    update, audit logging, and transaction recording.
 
     Per aeext-1.0.xsd:
     - name: Domain name (required)
@@ -262,6 +257,7 @@ class AeDomainTransferRegistrantHandler(ObjectCommandHandler):
 
     command_name = "ae_transfer_registrant"
     object_type = "domain"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -289,6 +285,17 @@ class AeDomainTransferRegistrantHandler(ObjectCommandHandler):
                 "Required parameter missing",
                 reason="curExpDate required for registrant transfer"
             )
+
+        # Parse date string to datetime if needed
+        if isinstance(cur_exp_date, str):
+            try:
+                cur_exp_date = datetime.strptime(cur_exp_date[:10], "%Y-%m-%d")
+            except ValueError:
+                raise CommandError(
+                    2005,
+                    "Parameter value syntax error",
+                    reason="Invalid curExpDate format"
+                )
 
         # Required AE fields
         eligibility_type = data.get("eligibilityType")
@@ -369,119 +376,69 @@ class AeDomainTransferRegistrantHandler(ObjectCommandHandler):
                 reason=f"Invalid eligibilityIDType: {eligibility_id_type}"
             )
 
-        # Get domain and verify
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
+        # Build registrant extension_t data for PL/SQL
+        new_values = {
+            "registrantName": registrant_name,
+            "eligibilityType": eligibility_type,
+            "policyReason": str(policy_reason),
+            "explanation": explanation,
+        }
+        # Add optional fields
+        if data.get("registrantID"):
+            new_values["registrantID"] = data["registrantID"]
+        if registrant_id_type:
+            new_values["registrantIDType"] = registrant_id_type
+        if data.get("eligibilityName"):
+            new_values["eligibilityName"] = data["eligibilityName"]
+        if data.get("eligibilityID"):
+            new_values["eligibilityID"] = data["eligibilityID"]
+        if eligibility_id_type:
+            new_values["eligibilityIDType"] = eligibility_id_type
 
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
+        registrant_data = {
+            "extension": "aeext",
+            "new_values": new_values,
+            "reason": ""
+        }
 
-        # Verify sponsoring registrar
-        if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError("Only sponsoring registrar can transfer registrant")
+        # Call PL/SQL stored procedure
+        from src.database.plsql_caller import get_plsql_caller
+        plsql = await get_plsql_caller()
+        result = await plsql.registrant_transfer(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            name=domain_name,
+            cur_exp_date=cur_exp_date,
+            period=period,
+            period_unit=period_unit,
+            registrant_data=registrant_data
+        )
 
-        # Verify current expiry date matches (prevents replay)
-        actual_exp_date = domain.get("exDate", "")
-        if actual_exp_date:
-            # Normalize to date only for comparison
-            if isinstance(actual_exp_date, str):
-                actual_date = actual_exp_date[:10]  # YYYY-MM-DD
-            else:
-                actual_date = actual_exp_date.strftime("%Y-%m-%d")
-
-            if isinstance(cur_exp_date, str):
-                provided_date = cur_exp_date[:10]
-            else:
-                provided_date = cur_exp_date.strftime("%Y-%m-%d")
-
-            if actual_date != provided_date:
-                raise CommandError(
-                    2306,
-                    "Parameter value policy error",
-                    reason=f"curExpDate mismatch: expected {actual_date}"
-                )
-
-        # Check domain status
-        statuses = domain.get("statuses", [])
-        for status in statuses:
-            status_value = status.get("s") if isinstance(status, dict) else status
-            if status_value in ("clientUpdateProhibited", "serverUpdateProhibited",
-                               "clientTransferProhibited", "serverTransferProhibited"):
-                raise CommandError(
-                    2304,
-                    "Object status prohibits operation",
-                    reason=f"Domain has {status_value} status"
-                )
-
-        # Get zone and rate for billing
-        zone = domain.get("_zone")
-        rate = await domain_repo.get_rate(zone, period, period_unit)
-        if rate is None:
-            raise CommandError(
-                2306,
-                "Parameter value policy error",
-                reason=f"No rate found for {period}{period_unit} in zone {zone}"
+        rc = result.get("response_code", 2400)
+        if rc >= 2000:
+            return self.response_builder.build_error(
+                code=rc,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
             )
-
-        # Check balance (registrant transfer charges create fee)
-        account_repo = await get_account_repo()
-        balance = await account_repo.get_balance(session.account_id)
-        if balance < rate:
-            raise CommandError(
-                2104,
-                "Billing failure",
-                reason="Insufficient balance for registrant transfer"
-            )
-
-        # Perform the registrant transfer
-        extension_repo = await get_extension_repo()
-        try:
-            result = await extension_repo.transfer_ae_registrant(
-                domain_roid=domain.get("roid"),
-                domain_name=domain_name,
-                account_id=session.account_id,
-                user_id=session.user_id,
-                registrant_name=registrant_name,
-                explanation=explanation,
-                eligibility_type=eligibility_type,
-                policy_reason=policy_reason,
-                period=period,
-                period_unit=period_unit,
-                registrant_id=data.get("registrantID"),
-                registrant_id_type=registrant_id_type,
-                eligibility_name=data.get("eligibilityName"),
-                eligibility_id=data.get("eligibilityID"),
-                eligibility_id_type=eligibility_id_type,
-                rate=rate,
-            )
-        except Exception as e:
-            logger.error(f"Failed to transfer registrant for {domain_name}: {e}")
-            raise CommandError(2400, "Command failed", reason=str(e))
 
         # Build response with new expiry date
         result_data = self.response_builder.build_ae_transfer_registrant_result(
-            name=domain_name,
-            ex_date=result.get("exDate")
+            name=result.get("name", domain_name),
+            ex_date=result.get("ex_date")
         )
 
         logger.info(f"Transferred AE registrant for domain: {domain_name}")
 
-        return self.success_response(
+        return self.response_builder.build_response(
+            code=rc,
+            message=result.get("response_message"),
             cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid"),
             result_data=result_data
         )
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            return await domain_repo.get_roid(domain_name)
-        return None
 
 
 # Handler registry for AE extension commands
