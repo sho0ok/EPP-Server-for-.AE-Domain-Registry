@@ -401,11 +401,13 @@ class DomainCreateHandler(ObjectCommandHandler):
                 "keyData": secdns.get("keyData", [])
             }
 
-        # IDN language
+        # IDN language and userform
         idna_language = None
+        idn_userform = None
         if "idnadomain" in command.extensions:
             idn = command.extensions["idnadomain"]
             idna_language = idn.get("language")
+            idn_userform = idn.get("userForm")
 
         # Call ARI's stored procedure - it handles EVERYTHING
         plsql = await get_plsql_caller()
@@ -420,7 +422,7 @@ class DomainCreateHandler(ObjectCommandHandler):
             registrant=registrant_id,
             contacts=contacts,
             auth_info=auth_info,
-            userform=domain_name,  # For non-IDN domains, userform = domain name
+            userform=idn_userform or domain_name,
             idna_language=idna_language,
             extensions=extension_list,
             dnssec=dnssec_data
