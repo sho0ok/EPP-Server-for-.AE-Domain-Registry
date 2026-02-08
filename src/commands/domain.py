@@ -457,13 +457,13 @@ class DomainCreateHandler(ObjectCommandHandler):
 
         result = []
 
-        # AE Eligibility extension
+        # AE Eligibility extension (DB extension code is 'ae')
         if "aeEligibility" in extensions:
             ae_ext = extensions["aeEligibility"]
             fields = ae_ext.get("fields", {})
             if fields:
                 result.append({
-                    "extension": "aeEligibility",
+                    "extension": "ae",
                     "new_values": fields,
                     "reason": ""
                 })
