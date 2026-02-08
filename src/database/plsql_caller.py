@@ -780,7 +780,7 @@ class EPPProcedureCaller:
         """
         authinfo_literal = (
             f"epp_authinfo_t('{self._escape_sql(auth_info)}', NULL)"
-            if auth_info else "epp_authinfo_t()"
+            if auth_info else "NULL"
         )
 
         date_fmt = 'YYYY-MM-DD"T"HH24:MI:SS".0Z"'
