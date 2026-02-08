@@ -652,6 +652,8 @@ class EPPProcedureCaller:
         dnssec_literal = self._build_dnssec_literal(dnssec) if dnssec else "NULL"
         authinfo_literal = f"epp_authinfo_t('{self._escape_sql(auth_info)}', NULL)"
 
+        logger.info(f"domain_create extensions_literal: {extensions_literal}")
+
         sql = f"""
             DECLARE
                 l_response     epp_response_t;
