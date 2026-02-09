@@ -649,7 +649,6 @@ class EPPProcedureCaller:
         ns_literal = self._build_string_list_literal(nameservers) if nameservers else "epp_hos_list_t()"
         contacts_literal = self._build_contact_list_literal(contacts) if contacts else "epp_dom_contact_list_t()"
         extensions_literal = self._build_extension_list_literal(extensions) if extensions else "extension_list_t()"
-        logger.info(f"domain_create extensions_literal={extensions_literal}")
         dnssec_literal = self._build_dnssec_literal(dnssec) if dnssec else "NULL"
         authinfo_literal = f"epp_authinfo_t('{self._escape_sql(auth_info)}', NULL)"
 
