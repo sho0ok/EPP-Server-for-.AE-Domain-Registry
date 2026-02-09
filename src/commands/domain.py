@@ -459,11 +459,27 @@ class DomainCreateHandler(ObjectCommandHandler):
 
         result = []
 
-        # AE Eligibility extension (DB extension code is 'ae')
-        # For domain create: data goes in current_values, new_values=None, reason='Domain Create'
-        if "aeEligibility" in extensions:
-            ae_ext = extensions["aeEligibility"]
-            fields = ae_ext.get("fields", {})
+        # AE Extension (aeext:create parsed as "aeext" key)
+        # DB extension code is 'ae', data goes in current_values, new_values=None
+        if "aeext" in extensions:
+            ae_ext = extensions["aeext"]
+            # Map XML field names to DB field_key names
+            # Parser returns: registrantID (value), registrantIDType, eligibilityID (value), etc.
+            # DB expects: registrantIDValue, registrantIDType, eligibilityIDValue, etc.
+            fields = {}
+            field_map = {
+                "registrantName": "registrantName",
+                "registrantID": "registrantIDValue",
+                "registrantIDType": "registrantIDType",
+                "eligibilityType": "eligibilityType",
+                "eligibilityName": "eligibilityName",
+                "eligibilityID": "eligibilityIDValue",
+                "eligibilityIDType": "eligibilityIDType",
+                "policyReason": "policyReason",
+            }
+            for xml_key, db_key in field_map.items():
+                if xml_key in ae_ext:
+                    fields[db_key] = str(ae_ext[xml_key])
             if fields:
                 result.append({
                     "extension": "ae",
@@ -472,21 +488,9 @@ class DomainCreateHandler(ObjectCommandHandler):
                     "reason": "Domain Create"
                 })
 
-        # AE Domain extension
-        if "aeDomain" in extensions:
-            ae_dom = extensions["aeDomain"]
-            fields = ae_dom.get("fields", {})
-            if fields:
-                result.append({
-                    "extension": "aeDomain",
-                    "current_values": fields,
-                    "new_values": None,
-                    "reason": "Domain Create"
-                })
-
-        # Generic extensions
+        # Generic extensions (skip known handled ones)
         for ext_name, ext_data in extensions.items():
-            if ext_name in ("aeEligibility", "aeDomain", "secDNS", "idnadomain", "kv", "variant", "sync"):
+            if ext_name in ("aeext", "secDNS", "idnadomain", "kv", "variant", "sync", "arext", "auext"):
                 continue
             if isinstance(ext_data, dict):
                 fields = ext_data.get("data") or ext_data.get("fields", {})
