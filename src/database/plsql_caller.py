@@ -258,8 +258,6 @@ class EPPProcedureCaller:
         # Build the URN lists as Oracle collection types
         obj_uri_str = self._build_urn_list_literal(obj_uris)
         ext_uri_str = self._build_urn_list_literal(ext_uris)
-        logger.info(f"epp.login() ext_uris from client: {ext_uris}")
-        logger.info(f"epp.login() ext_uri_str for PL/SQL: {ext_uri_str}")
 
         sql = f"""
             DECLARE

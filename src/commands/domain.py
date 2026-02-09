@@ -388,8 +388,6 @@ class DomainCreateHandler(ObjectCommandHandler):
 
         # Build extension data for the PL/SQL call
         extension_list = self._build_extensions(command.extensions)
-        logger.info(f"domain_create extensions: {command.extensions}")
-        logger.info(f"domain_create extension_list for PL/SQL: {extension_list}")
 
         # Build DNSSEC data
         dnssec_data = None
