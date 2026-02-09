@@ -33,4 +33,6 @@ epp:
     - "urn:ietf:params:xml:ns:domain-1.0"
     - "urn:ietf:params:xml:ns:contact-1.0"
     - "urn:ietf:params:xml:ns:host-1.0"
-  supported_extensions: []
+  supported_extensions:
+    - "urn:X-ae:params:xml:ns:aeext-1.0"
+    - "urn:X-ar:params:xml:ns:idn-1.0"
