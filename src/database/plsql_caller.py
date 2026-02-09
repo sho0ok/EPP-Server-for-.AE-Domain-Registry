@@ -1357,7 +1357,7 @@ class EPPProcedureCaller:
         """
         authinfo_literal = (
             f"epp_authinfo_t('{self._escape_sql(auth_info)}', NULL)"
-            if auth_info else "epp_authinfo_t()"
+            if auth_info else "NULL"
         )
 
         sql = f"""
@@ -1483,7 +1483,7 @@ class EPPProcedureCaller:
 
         # Build chg fields
         registrant_lit = f"eppcom_clid_t('{self._escape_sql(chg_registrant)}')" if chg_registrant else "NULL"
-        authinfo_lit = f"epp_authinfo_t('{self._escape_sql(chg_authinfo)}', NULL)" if chg_authinfo else "epp_authinfo_t()"
+        authinfo_lit = f"epp_authinfo_t('{self._escape_sql(chg_authinfo)}', NULL)" if chg_authinfo else "NULL"
 
         # Extensions
         extensions_lit = self._build_extension_list_literal(extensions) if extensions else "extension_list_t()"
@@ -1504,6 +1504,8 @@ class EPPProcedureCaller:
                 l_code       NUMBER;
                 l_msg        VARCHAR2(4000);
                 l_svtrid     VARCHAR2(64);
+                l_err_value  VARCHAR2(4000);
+                l_ext_reason VARCHAR2(4000);
             BEGIN
                 epp_domain.domain_update(
                     p_connection_id => :connection_id,
@@ -1523,6 +1525,17 @@ class EPPProcedureCaller:
                     IF l_response.result(1).msg IS NOT NULL THEN
                         l_msg := l_response.result(1).msg.string;
                     END IF;
+                    IF l_response.result(1).value IS NOT NULL THEN
+                        l_err_value := l_response.result(1).value.value;
+                    END IF;
+                    IF l_response.result(1).extvalue IS NOT NULL THEN
+                        IF l_response.result(1).extvalue.value IS NOT NULL THEN
+                            l_err_value := l_response.result(1).extvalue.value.value;
+                        END IF;
+                        IF l_response.result(1).extvalue.msg IS NOT NULL THEN
+                            l_ext_reason := l_response.result(1).extvalue.msg.string;
+                        END IF;
+                    END IF;
                 END IF;
 
                 IF l_response.trid IS NOT NULL THEN
@@ -1532,6 +1545,8 @@ class EPPProcedureCaller:
                 :response_code := l_code;
                 :response_msg := l_msg;
                 :sv_trid := l_svtrid;
+                :err_value := l_err_value;
+                :ext_reason := l_ext_reason;
             END;
         """
 
@@ -1545,7 +1560,9 @@ class EPPProcedureCaller:
                 "expire_date": expire_date,
                 "response_code": cursor.var(int),
                 "response_msg": cursor.var(str, 4000),
-                "sv_trid": cursor.var(str, 64)
+                "sv_trid": cursor.var(str, 64),
+                "err_value": cursor.var(str, 4000),
+                "ext_reason": cursor.var(str, 4000)
             }
 
             cursor.execute(sql, binds)
@@ -1555,7 +1572,9 @@ class EPPProcedureCaller:
             return {
                 "response_code": self._extract_var(binds["response_code"], 2400),
                 "response_message": self._extract_var(binds["response_msg"], ""),
-                "sv_trid": self._extract_var(binds["sv_trid"], None)
+                "sv_trid": self._extract_var(binds["sv_trid"], None),
+                "err_value": self._extract_var(binds["err_value"], None),
+                "ext_reason": self._extract_var(binds["ext_reason"], None)
             }
 
     # ========================================================================
