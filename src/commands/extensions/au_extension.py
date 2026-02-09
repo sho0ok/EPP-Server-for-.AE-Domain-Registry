@@ -5,6 +5,9 @@ Handles .au TLD specific EPP extension commands per auext-1.1 schema:
 - AuDomainModifyRegistrant: Correct eligibility data without changing legal registrant
 - AuDomainTransferRegistrant: Transfer domain to new legal entity (charges create fee)
 
+All commands delegate to ARI PL/SQL stored procedures for full parity with
+the original C++ EPP server.
+
 Namespace: urn:X-au:params:xml:ns:auext-1.1
 """
 
@@ -15,13 +18,10 @@ from typing import Any, Dict, List, Optional
 from src.commands.base import (
     ObjectCommandHandler,
     CommandError,
-    ObjectNotFoundError,
-    AuthorizationError,
 )
 from src.core.session_manager import SessionInfo
 from src.core.xml_processor import EPPCommand
-from src.database.repositories.domain_repo import get_domain_repo
-from src.database.repositories.extension_repo import get_extension_repo
+from src.database.plsql_caller import get_plsql_caller
 
 logger = logging.getLogger("epp.commands.au_extension")
 
@@ -69,13 +69,14 @@ AU_ELIGIBILITY_ID_TYPES = [
 
 class AuDomainModifyRegistrantHandler(ObjectCommandHandler):
     """
-    Handle auext:update (domain modify registrant) command.
+    Handle auext:update (domain modify registrant) command via epp_domain.domain_update().
 
     This command corrects AU extension data for .au domains where the
-    legal registrant has NOT changed. Use this to fix incorrectly
-    specified eligibility data.
+    legal registrant has NOT changed. Implemented as domain:update with
+    AU extension data passed through p_extensions parameter.
 
-    This is implemented as a domain:update command with auext:update extension.
+    PL/SQL handles authorization, status validation, extension update,
+    audit logging, and transaction recording.
 
     Per auext-1.1.xsd:
     - registrantName: Required
@@ -89,6 +90,7 @@ class AuDomainModifyRegistrantHandler(ObjectCommandHandler):
 
     command_name = "au_modify_registrant"
     object_type = "domain"
+    plsql_managed = True
 
     async def handle(
         self,
@@ -196,63 +198,57 @@ class AuDomainModifyRegistrantHandler(ObjectCommandHandler):
                 reason=f"Invalid eligibilityIDType: {eligibility_id_type}"
             )
 
-        # Get domain and verify authorization
-        domain_repo = await get_domain_repo()
-        domain = await domain_repo.get_by_name(domain_name)
+        # Build extension data for domain_update p_extensions parameter
+        new_values = {
+            "registrantName": registrant_name,
+            "eligibilityType": eligibility_type,
+            "policyReason": str(policy_reason),
+            "explanation": explanation,
+        }
+        if au_data.get("registrantID"):
+            new_values["registrantIDValue"] = au_data["registrantID"]
+        if registrant_id_type:
+            new_values["registrantIDType"] = registrant_id_type
+        if au_data.get("eligibilityName"):
+            new_values["eligibilityName"] = au_data["eligibilityName"]
+        if au_data.get("eligibilityID"):
+            new_values["eligibilityIDValue"] = au_data["eligibilityID"]
+        if eligibility_id_type:
+            new_values["eligibilityIDType"] = eligibility_id_type
 
-        if not domain:
-            raise ObjectNotFoundError("domain", domain_name)
+        extension_list = [{
+            "extension": "au",
+            "new_values": new_values,
+            "reason": ""
+        }]
 
-        # Verify sponsoring registrar
-        if domain.get("_account_id") != session.account_id:
-            raise AuthorizationError("Only sponsoring registrar can modify registrant data")
+        # Call epp_domain.domain_update() with extension data
+        plsql = await get_plsql_caller()
+        result = await plsql.domain_update(
+            connection_id=session.connection_id,
+            session_id=session.session_id,
+            cltrid=cl_trid,
+            name=domain_name,
+            extensions=extension_list
+        )
 
-        # Check domain status
-        statuses = domain.get("statuses", [])
-        for status in statuses:
-            status_value = status.get("s") if isinstance(status, dict) else status
-            if status_value in ("clientUpdateProhibited", "serverUpdateProhibited"):
-                raise CommandError(
-                    2304,
-                    "Object status prohibits operation",
-                    reason=f"Domain has {status_value} status"
-                )
-
-        # Perform the update
-        extension_repo = await get_extension_repo()
-        try:
-            await extension_repo.update_au_registrant_data(
-                domain_roid=domain.get("roid"),
-                user_id=session.user_id,
-                registrant_name=registrant_name,
-                explanation=explanation,
-                eligibility_type=eligibility_type,
-                policy_reason=policy_reason,
-                registrant_id=au_data.get("registrantID"),
-                registrant_id_type=registrant_id_type,
-                eligibility_name=au_data.get("eligibilityName"),
-                eligibility_id=au_data.get("eligibilityID"),
-                eligibility_id_type=eligibility_id_type,
+        rc = result.get("response_code", 2400)
+        if rc >= 2000:
+            return self.response_builder.build_error(
+                code=rc,
+                message=result.get("response_message", "Command failed"),
+                cl_trid=cl_trid,
+                sv_trid=result.get("sv_trid")
             )
-        except Exception as e:
-            logger.error(f"Failed to modify registrant for {domain_name}: {e}")
-            raise CommandError(2400, "Command failed", reason=str(e))
 
         logger.info(f"Modified AU registrant data for domain: {domain_name}")
 
-        return self.success_response(cl_trid=cl_trid)
-
-    async def get_roid_from_command(
-        self,
-        command: EPPCommand,
-        session: SessionInfo
-    ) -> Optional[str]:
-        """Extract ROID for transaction logging."""
-        domain_name = command.data.get("name")
-        if domain_name:
-            domain_repo = await get_domain_repo()
-            return await domain_repo.get_roid(domain_name)
-        return None
+        return self.response_builder.build_response(
+            code=rc,
+            message=result.get("response_message"),
+            cl_trid=cl_trid,
+            sv_trid=result.get("sv_trid")
+        )
 
 
 class AuDomainTransferRegistrantHandler(ObjectCommandHandler):
@@ -423,7 +419,6 @@ class AuDomainTransferRegistrantHandler(ObjectCommandHandler):
         }
 
         # Call PL/SQL stored procedure
-        from src.database.plsql_caller import get_plsql_caller
         plsql = await get_plsql_caller()
         result = await plsql.registrant_transfer(
             connection_id=session.connection_id,
