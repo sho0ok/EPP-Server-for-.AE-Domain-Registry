@@ -690,6 +690,18 @@ class EPPProcedureCaller:
                     IF l_response.result(1).msg IS NOT NULL THEN
                         l_msg := l_response.result(1).msg.string;
                     END IF;
+                    -- Extract error value (reason for failure)
+                    IF l_response.result(1).value IS NOT NULL THEN
+                        :err_value := l_response.result(1).value.value;
+                    END IF;
+                    IF l_response.result(1).extvalue IS NOT NULL THEN
+                        IF l_response.result(1).extvalue.value IS NOT NULL THEN
+                            :ext_err_value := l_response.result(1).extvalue.value.value;
+                        END IF;
+                        IF l_response.result(1).extvalue.msg IS NOT NULL THEN
+                            :ext_err_reason := l_response.result(1).extvalue.msg.string;
+                        END IF;
+                    END IF;
                 ELSE
                     l_code := 2400;
                     l_msg := 'No response from domain_create';
@@ -730,7 +742,10 @@ class EPPProcedureCaller:
                 "sv_trid": cursor.var(str, 64),
                 "cr_name": cursor.var(str, 255),
                 "cr_date": cursor.var(str, 30),
-                "ex_date": cursor.var(str, 30)
+                "ex_date": cursor.var(str, 30),
+                "err_value": cursor.var(str, 4000),
+                "ext_err_value": cursor.var(str, 4000),
+                "ext_err_reason": cursor.var(str, 4000),
             }
 
             try:
@@ -742,6 +757,9 @@ class EPPProcedureCaller:
                 raise
 
             response_code = self._extract_var(binds["response_code"], 2400)
+            err_value = self._extract_var(binds["err_value"], None)
+            ext_err_value = self._extract_var(binds["ext_err_value"], None)
+            ext_err_reason = self._extract_var(binds["ext_err_reason"], None)
             result = {
                 "response_code": response_code,
                 "response_message": self._extract_var(binds["response_msg"], ""),
@@ -757,6 +775,11 @@ class EPPProcedureCaller:
                 f"epp_domain.domain_create({name}) returned code={response_code}, "
                 f"cr_date={result['cr_date']}, ex_date={result['ex_date']}"
             )
+            if response_code >= 2000:
+                logger.warning(
+                    f"epp_domain.domain_create({name}) error detail: "
+                    f"value={err_value}, ext_value={ext_err_value}, ext_reason={ext_err_reason}"
+                )
 
             return result
 

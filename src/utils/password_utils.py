@@ -19,19 +19,19 @@ AUTH_INFO_MIN_LENGTH = 8
 AUTH_INFO_MAX_LENGTH = 32
 AUTH_INFO_DEFAULT_LENGTH = 16
 
-# Character set for generated auth info
-# Excludes ambiguous characters (0, O, l, 1, I)
-AUTH_INFO_CHARS = (
-    string.ascii_uppercase.replace("O", "").replace("I", "") +
-    string.ascii_lowercase.replace("l", "") +
-    string.digits.replace("0", "").replace("1", "") +
-    "!@#$%^&*"
-)
+# Character pools matching ARI's PasswordUtil.java requirements
+AUTH_INFO_UPPER = string.ascii_uppercase
+AUTH_INFO_LOWER = string.ascii_lowercase
+AUTH_INFO_DIGITS = string.digits
+AUTH_INFO_SYMBOLS = "!@#$%^&*()?"
 
 
 def generate_auth_info(length: int = AUTH_INFO_DEFAULT_LENGTH) -> str:
     """
-    Generate a random auth info string.
+    Generate a random auth info string matching ARI's password policy.
+
+    ARI requires at least 2 uppercase, 2 lowercase, 2 digits, and
+    2 special characters (!@#$%^&*()?). Length 8-16.
 
     Args:
         length: Length of auth info (default 16)
@@ -44,11 +44,23 @@ def generate_auth_info(length: int = AUTH_INFO_DEFAULT_LENGTH) -> str:
     if length > AUTH_INFO_MAX_LENGTH:
         length = AUTH_INFO_MAX_LENGTH
 
-    # Use secrets for cryptographic randomness
-    auth_info = "".join(
-        secrets.choice(AUTH_INFO_CHARS) for _ in range(length)
-    )
+    # Guarantee minimum 2 of each required category (matching ARI's PasswordUtil.java)
+    chars = []
+    chars.extend(secrets.choice(AUTH_INFO_UPPER) for _ in range(2))
+    chars.extend(secrets.choice(AUTH_INFO_LOWER) for _ in range(2))
+    chars.extend(secrets.choice(AUTH_INFO_DIGITS) for _ in range(2))
+    chars.extend(secrets.choice(AUTH_INFO_SYMBOLS) for _ in range(2))
 
+    # Fill remaining with random from all pools
+    all_chars = AUTH_INFO_UPPER + AUTH_INFO_LOWER + AUTH_INFO_DIGITS + AUTH_INFO_SYMBOLS
+    for _ in range(length - 8):
+        chars.append(secrets.choice(all_chars))
+
+    # Shuffle to avoid predictable pattern
+    shuffled = list(chars)
+    secrets.SystemRandom().shuffle(shuffled)
+
+    auth_info = "".join(shuffled)
     logger.debug(f"Generated auth info of length {length}")
     return auth_info
 
