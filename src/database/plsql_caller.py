@@ -652,8 +652,6 @@ class EPPProcedureCaller:
         dnssec_literal = self._build_dnssec_literal(dnssec) if dnssec else "NULL"
         authinfo_literal = f"epp_authinfo_t('{self._escape_sql(auth_info)}', NULL)"
 
-        logger.info(f"domain_create extensions_literal: {extensions_literal}")
-
         sql = f"""
             DECLARE
                 l_response     epp_response_t;
@@ -1618,8 +1616,11 @@ class EPPProcedureCaller:
             reason = self._escape_sql(ext.get("reason", ""))
 
             # Build key_value_list_t for current_values and new_values
-            current_kv = self._build_kv_list_literal(ext.get("current_values"))
-            new_kv = self._build_kv_list_literal(ext.get("new_values"))
+            # Use NULL when explicitly set to None (e.g., domain create: new_values=NULL)
+            cv = ext.get("current_values")
+            nv = ext.get("new_values")
+            current_kv = self._build_kv_list_literal(cv) if cv else "NULL"
+            new_kv = self._build_kv_list_literal(nv) if nv else "NULL"
 
             items.append(
                 f"extension_t('{ext_name}', {current_kv}, {new_kv}, '{reason}')"

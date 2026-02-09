@@ -458,14 +458,16 @@ class DomainCreateHandler(ObjectCommandHandler):
         result = []
 
         # AE Eligibility extension (DB extension code is 'ae')
+        # For domain create: data goes in current_values, new_values=None, reason='Domain Create'
         if "aeEligibility" in extensions:
             ae_ext = extensions["aeEligibility"]
             fields = ae_ext.get("fields", {})
             if fields:
                 result.append({
                     "extension": "ae",
-                    "new_values": fields,
-                    "reason": ""
+                    "current_values": fields,
+                    "new_values": None,
+                    "reason": "Domain Create"
                 })
 
         # AE Domain extension
@@ -475,8 +477,9 @@ class DomainCreateHandler(ObjectCommandHandler):
             if fields:
                 result.append({
                     "extension": "aeDomain",
-                    "new_values": fields,
-                    "reason": ""
+                    "current_values": fields,
+                    "new_values": None,
+                    "reason": "Domain Create"
                 })
 
         # Generic extensions
@@ -488,8 +491,9 @@ class DomainCreateHandler(ObjectCommandHandler):
                 if fields:
                     result.append({
                         "extension": ext_name,
-                        "new_values": fields,
-                        "reason": ""
+                        "current_values": fields,
+                        "new_values": None,
+                        "reason": "Domain Create"
                     })
 
         return result if result else None
